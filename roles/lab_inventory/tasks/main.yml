@@ -1,0 +1,162 @@
+# Validates the inventory before anything touches the host. Runs on the controller only.
+- name: Check there is exactly one Proxmox host
+  ansible.builtin.assert:
+    that: groups['pve'] | default([]) | length == 1
+    fail_msg: "The inventory must have exactly one host in the 'pve' group, found {{ groups['pve'] | default([]) | length }}."
+    quiet: true
+
+- name: Check the management network
+  vars:
+    net: "{{ (lab_mgmt.gateway ~ '/' ~ lab_mgmt.prefix) | ansible.utils.ipaddr('network/prefix') }}"
+    guests: "{{ [lab_mgmt.vsr_ip, lab_mgmt.gen_ip, lab_mgmt.radius_ip] }}"
+  ansible.builtin.assert:
+    that:
+      - lab_mgmt.bridge is string and lab_mgmt.bridge | length > 0
+      - net is ansible.utils.ipv4
+      - lab_mgmt.dns | length > 0
+      - lab_mgmt.ntp | length > 0
+      - lab_mgmt.timezone is string
+      - guests | unique | length == 3
+      - lab_mgmt.gateway not in guests
+      - guests | select('ansible.utils.in_network', net) | list | length == 3
+      - net | ansible.utils.ipaddr('network') not in guests
+      - net | ansible.utils.ipaddr('broadcast') not in guests
+    fail_msg: >-
+      lab_mgmt is incomplete or inconsistent: it needs bridge, prefix, gateway, dns, ntp and timezone,
+      and vsr_ip, gen_ip and radius_ip must be distinct usable addresses in {{ net }} other than the gateway.
+    quiet: true
+
+- name: Check the looped links
+  vars:
+    pci_re: '^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$'
+    access: "{{ lab_links | selectattr('role', 'eq', 'access') | list }}"
+    all_pci: "{{ lab_links | map(attribute='bng_pci') | list + lab_links | map(attribute='gen_pci') | list }}"
+  ansible.builtin.assert:
+    that:
+      - lab_links | map(attribute='name') | unique | length == lab_links | length
+      - lab_links | map(attribute='role') | difference(['access', 'core']) | length == 0
+      - lab_links | selectattr('role', 'eq', 'access') | list | length >= 1
+      - lab_links | selectattr('role', 'eq', 'core') | list | length == 1
+      - all_pci | select('match', pci_re) | list | length == all_pci | length
+      - all_pci | unique | length == all_pci | length
+      - access | map(attribute='tpid', default='0x8100') | difference(['0x8100', '0x88a8']) | length == 0
+      - lab_links | selectattr('role', 'eq', 'core') | selectattr('tpid', 'defined') | list | length == 0
+    fail_msg: >-
+      lab_links is invalid: names must be unique, role must be access or core, with at least one access
+      link and exactly one core link, and every bng_pci/gen_pci must be a distinct full PCI address
+      such as 0000:01:00.0 (lower case). tpid is set on access links only, as "0x8100" or "0x88a8".
+    quiet: true
+
+# Link names become Linux interface names on the generator and <name>-lag on the VSR, and
+# interface names are limited to 15 characters.
+- name: Check the link names
+  vars:
+    bad_names: "{{ lab_links | map(attribute='name') | reject('match', '^[a-z][a-z0-9-]{0,10}$') | list }}"
+  ansible.builtin.assert:
+    that: bad_names | length == 0
+    fail_msg: >-
+      lab_links names {{ bad_names | join(', ') }} are invalid: a link name must start with a lower-case
+      letter and have at most 11 characters, all lower-case letters, digits or hyphens, so that
+      <name>-lag fits the 15-character interface name limit.
+    quiet: true
+
+# Intel 700-series NICs (X710, XL710, XXV710) do RSS for one S-tag ethertype per chip, so
+# access ports on one chip with different TPIDs lose RSS on one of them. Ports of one chip
+# share a PCI device and differ only in the function number.
+- name: Warn about mixed TPIDs on one NIC chip
+  vars:
+    access: "{{ lab_links | selectattr('role', 'eq', 'access') | list }}"
+    chips: >-
+      {{ access | map(attribute='bng_pci') | map('regex_replace', '\.[0-7]$', '') | unique }}
+  ansible.builtin.debug:
+    msg: >-
+      VSR access ports on PCI device {{ item }} use different TPIDs
+      ({{ access | selectattr('bng_pci', 'match', item ~ '\.') | map(attribute='tpid', default='0x8100') | unique | join(', ') }}).
+      Intel 700-series NICs do RSS for only one TPID per chip, so one of these ports would get no RSS.
+  loop: "{{ chips }}"
+  when: >-
+    access | selectattr('bng_pci', 'match', item ~ '\.') | map(attribute='tpid', default='0x8100') | unique | length > 1
+
+- name: Check the subscribers
+  vars:
+    pppoe: "{{ lab_subscribers.broadband_pppoe | default({}) }}"
+    dhcp: "{{ lab_subscribers.broadband_dhcp | default({}) }}"
+  ansible.builtin.assert:
+    that:
+      - pppoe.count | default(-1) | int >= 0 and dhcp.count | default(-1) | int >= 0
+      - pppoe.username | default('') is search('{n}')
+      - pppoe.password | default('') | length > 0 and dhcp.password | default('') | length > 0
+    fail_msg: >-
+      lab_subscribers needs broadband_pppoe (count, username containing {n}, password) and
+      broadband_dhcp (count, password).
+    quiet: true
+
+- name: Check the access areas
+  vars:
+    areas: "{{ lab_access_areas | default([]) }}"
+    s_tags: "{{ areas | map(attribute='s_tag') | map('int') | list }}"
+    access_links: "{{ lab_links | selectattr('role', 'eq', 'access') | list }}"
+  ansible.builtin.assert:
+    that:
+      - areas | length > 0
+      - areas | map(attribute='name') | unique | length == areas | length
+      - s_tags | unique | length == s_tags | length
+      - s_tags | select('ge', 1) | select('le', 4094) | list | length == s_tags | length
+      - areas | selectattr('tpid', 'defined') | list | length == 0
+      - areas | map(attribute='link', default=(access_links | first).name) | difference(access_links | map(attribute='name')) | length == 0
+      - lab_subscribers | bnglab_subscribers(areas, access_links, lab_rsp_code | default('RSP'), lab_bng) is iterable
+    fail_msg: >-
+      lab_access_areas needs at least one area, each with a unique name, a unique S-tag between 1 and 4094,
+      a link that is an access link, a provider with a profile in regions/, and room for its subscribers
+      (C-tags 2-4000: up to 1999 of each type per area). The S-tag ethertype is set per access link (tpid
+      in lab_links), not per area.
+    quiet: true
+
+- name: Check the enterprise customers
+  vars:
+    vrfs: "{{ lab_bng.subscriber_vrfs | map(attribute='name') | list }}"
+  ansible.builtin.assert:
+    that: lab_enterprise | default([]) | bnglab_enterprise_plan(lab_links, lab_access_areas, vrfs) is iterable
+    quiet: true
+
+- name: Warn about enterprise customers BNG Blaster can't emulate
+  vars:
+    vrfs: "{{ lab_bng.subscriber_vrfs | map(attribute='name') | list }}"
+    skipped: >-
+      {{ lab_enterprise | default([]) | bnglab_enterprise_plan(lab_links, lab_access_areas, vrfs)
+         | rejectattr('c_tag') | selectattr('tpid', 'eq', '0x88a8') | map(attribute='name') | list }}
+  ansible.builtin.debug:
+    msg: >-
+      Untagged-handoff enterprise customers on a 0x88a8 link ({{ skipped | join(', ') }}) are configured
+      on the VSR but get no traffic: BNG Blaster can't send a single 0x88a8 tag from a network interface.
+  when: skipped | length > 0
+
+- name: Check the secrets
+  when: lab_check_secrets | default(true)
+  block:
+    - name: Find the secrets file
+      ansible.builtin.stat:
+        path: "{{ lab_secrets_file }}"
+      register: lab_inventory_secrets_stat
+
+    - name: Check the secrets file exists
+      ansible.builtin.assert:
+        that: lab_inventory_secrets_stat.stat.exists
+        fail_msg: "No secrets file at {{ lab_secrets_file }}. Copy vars/secrets.example.yml to vars/secrets.yml, or pass SECRETS=<path>."
+        quiet: true
+
+    - name: Load the secrets file
+      ansible.builtin.include_vars:
+        file: "{{ lab_secrets_file }}"
+
+    - name: Check every secret is filled in
+      vars:
+        required: [vsr_license_serial, vsr_admin_user, vsr_admin_password, radius_shared_secret, radius_coa_secret]
+      ansible.builtin.assert:
+        that:
+          - required | map('extract', vars) | select('in', ['', 'CHANGE-ME']) | list | length == 0
+          - lab_ssh_public_keys | length > 0
+          - lab_ssh_public_keys | reject('match', '^(ssh-|ecdsa-|sk-)') | list | length == 0
+          - lab_ssh_public_keys is not search('AAAA\.\.\.')
+        fail_msg: "{{ lab_secrets_file }} still has placeholder values. Fill in every CHANGE-ME and at least one real SSH public key."
+        quiet: true

@@ -1,0 +1,6 @@
+# Set false to skip the cable loop test (for example when ports are already bound to vfio-pci).
+preflight_loop_test: true
+# Seconds to wait for link carrier on both ends of a link.
+preflight_carrier_timeout: 20
+# Where reports are written on the controller (gitignored).
+preflight_results_root: "{{ playbook_dir | dirname }}/results"

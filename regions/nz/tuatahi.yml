@@ -1,0 +1,15 @@
+# Tuatahi (New Zealand). Current services use a 12-digit ID; older services still use the
+# legacy form, so the lab gives half of Tuatahi's subscribers each.
+# Format as seen by an RSP on this provider's network; every value is invented.
+name: Tuatahi
+remote_id:
+  # Current: UFF + 12 digits.
+  - format: "UFF{id:012d}"
+    id_start: 100000000001
+  # Legacy: UFF + the retail service provider's 3-character code + a 2-letter region
+  # code (HM is Hamilton) + 7 digits.
+  - format: "UFF{rsp}HM{id:07d}"
+    id_start: 1000001
+# <OLT> xpon <shelf/card/port>:<OLT and ONT position, invented here>, ending .10 when the
+# service is handed over tagged.
+circuit_id: "UFFLBOLTLAB001 xpon 0/{s_tag}/0/{c_tag}:1.101.10"

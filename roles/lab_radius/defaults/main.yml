@@ -1,0 +1,14 @@
+# Official FreeRADIUS image, run by Proxmox as an application container (OCI).
+# Change it only to test against a new FreeRADIUS release; that needs REBUILD=radius.
+lab_radius_image: docker.io/freeradius/freeradius-server:3.2.10
+lab_radius_cores: 1
+lab_radius_memory_mb: 512
+lab_radius_disk_gb: 2
+# Storage for the container's root disk; empty picks local-zfs, then local-lvm.
+lab_radius_storage: ""
+# Set to radius or all to destroy and rebuild the container.
+lab_radius_rebuild: ""
+# Interim accounting interval sent to the VSR, in seconds.
+lab_radius_acct_interim: 300
+# Staging directory on the Proxmox host for the files pushed into the container.
+lab_radius_stage: /var/lib/bnglab/radius

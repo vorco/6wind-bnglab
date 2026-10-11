@@ -1,0 +1,90 @@
+# The functional test suite (make test). Applies the whole lab configuration, brings every
+# subscriber up, runs traffic through the core, then checks addressing, L3VRFs, rate limits,
+# CoA, Disconnect and accounting, and writes results/test-<time>/summary.md.
+# Run once the lab is built (make generator).
+- name: Check the lab inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - lab_inventory
+  tasks:
+    - name: Create this run's results directory
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/../results/test-{{ lab_test_stamp }}"
+        state: directory
+        mode: "0755"
+      vars:
+        lab_test_stamp: "{{ now(utc=true, fmt='%Y%m%d-%H%M%S') }}"
+      register: lab_test_dir_created
+
+    - name: Remember the results directory
+      ansible.builtin.set_fact:
+        lab_test_dir: "{{ lab_test_dir_created.path }}"
+        lab_test_stamp: "{{ lab_test_dir_created.path | basename | replace('test-', '') }}"
+
+    - name: Add the VSR and the generator to this run's inventory
+      ansible.builtin.add_host:
+        name: "{{ item.name }}"
+        groups: ["{{ item.group }}"]
+        ansible_host: "{{ item.ip }}"
+        ansible_user: "{{ item.user }}"
+        ansible_password: "{{ item.password | default(omit) }}"
+        ansible_connection: "{{ item.connection }}"
+        ansible_network_os: "{{ item.network_os | default(omit) }}"
+        ansible_port: "{{ item.port }}"
+        ansible_ssh_private_key_file: "{{ hostvars[groups['pve'][0]].ansible_ssh_private_key_file | default(omit) }}"
+        ansible_ssh_common_args: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        ansible_python_interpreter: /usr/bin/python3
+      loop:
+        - {name: bnglab-vsr, group: lab_vsr, ip: "{{ lab_mgmt.vsr_ip }}", user: "{{ vsr_admin_user }}",
+           password: "{{ vsr_admin_password }}", connection: ansible.netcommon.netconf, network_os: default, port: 830}
+        - {name: bnglab-gen, group: lab_gen, ip: "{{ lab_mgmt.gen_ip }}", user: lab, connection: ssh, port: 22}
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: false
+      no_log: true
+
+- name: Refresh RADIUS
+  hosts: pve
+  gather_facts: false
+  pre_tasks:
+    - name: Load the secrets
+      ansible.builtin.include_vars:
+        file: "{{ lab_secrets_file }}"
+      no_log: true
+  roles:
+    - lab_radius
+
+- name: Configure the VSR
+  hosts: lab_vsr
+  gather_facts: false
+  pre_tasks:
+    - name: Load the secrets
+      ansible.builtin.include_vars:
+        file: "{{ lab_secrets_file }}"
+      no_log: true
+  roles:
+    - role: lab_vsr
+      vars:
+        lab_vsr_parts: [fast_path, interfaces, ppp_server, ipoe_server, core, enterprise]
+
+- name: Bring every subscriber up, run traffic, and run the checks
+  hosts: lab_gen
+  gather_facts: false
+  pre_tasks:
+    - name: Load the secrets
+      ansible.builtin.include_vars:
+        file: "{{ lab_secrets_file }}"
+      no_log: true
+  roles:
+    - role: lab_sessions
+      vars:
+        lab_sessions_core: true
+        lab_sessions_enterprise: true
+        lab_sessions_test: true
+        lab_sessions_hold: true
+    - role: lab_test
+      vars:
+        lab_test_dir: "{{ hostvars['localhost'].lab_test_dir }}"
+        lab_test_stamp: "{{ hostvars['localhost'].lab_test_stamp }}"

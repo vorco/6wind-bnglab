@@ -1,0 +1,15 @@
+# Stages the VSR and generator images on the host. Run after make host.
+- name: Check the lab inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    lab_check_secrets: false
+  roles:
+    - lab_inventory
+
+- name: Stage the images
+  hosts: pve
+  gather_facts: false
+  roles:
+    - images

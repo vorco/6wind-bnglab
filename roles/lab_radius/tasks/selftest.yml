@@ -1,0 +1,69 @@
+# Checks FreeRADIUS answers as expected for one subscriber of each profile, rejects
+# strangers, and records accounting. Uses the localhost client, so its accounting
+# lands in radacct/127.0.0.1/, apart from the VSR's.
+- name: Wait for FreeRADIUS to answer
+  ansible.builtin.command:
+    cmd: pct exec {{ lab_radius_vmid }} -- radclient -r 1 -t 2 -S /etc/freeradius/bnglab/radius-secret 127.0.0.1 status
+    stdin: Message-Authenticator = 0x00
+  register: lab_radius_status_check
+  until: lab_radius_status_check.rc == 0
+  retries: 15
+  delay: 2
+  changed_when: false
+
+- name: Send test requests
+  vars:
+    plan: >-
+      {{ lab_subscribers | bnglab_subscribers(lab_access_areas, lab_links | selectattr('role', 'eq', 'access') | list,
+                                              lab_rsp_code | default('RSP'), lab_bng) }}
+    pppoe: "{{ plan | selectattr('type', 'eq', 'pppoe') | first }}"
+    ipoe: "{{ plan | selectattr('type', 'eq', 'ipoe') | first }}"
+  ansible.builtin.command:
+    cmd: pct exec {{ lab_radius_vmid }} -- radclient -S /etc/freeradius/bnglab/radius-secret 127.0.0.1 {{ item.type }}
+    stdin: "{{ item.attrs }}"
+  loop:
+    - name: broadband-pppoe subscriber 1 on its line
+      type: auth
+      expect: Access-Accept
+      attrs: >-
+        User-Name = "{{ pppoe.username }}", User-Password = "{{ lab_subscribers.broadband_pppoe.password }}",
+        ADSL-Agent-Remote-Id = "{{ pppoe.remote_id }}"
+    - name: broadband-pppoe subscriber 1 on another line
+      type: auth
+      expect: Access-Reject
+      attrs: >-
+        User-Name = "{{ pppoe.username }}", User-Password = "{{ lab_subscribers.broadband_pppoe.password }}",
+        ADSL-Agent-Remote-Id = "{{ ipoe.remote_id }}"
+    - name: broadband-dhcp subscriber 1
+      type: auth
+      expect: Access-Accept
+      attrs: >-
+        User-Name = "{{ ipoe.username }}", User-Password = "{{ lab_subscribers.broadband_dhcp.password }}",
+        6WIND-dhcp-remote-id = "{{ ipoe.remote_id }}"
+    - name: unknown subscriber
+      type: auth
+      expect: Access-Reject
+      attrs: User-Name = "not-a-subscriber", User-Password = "x"
+    - name: accounting start
+      type: acct
+      expect: Accounting-Response
+      attrs: >-
+        Acct-Status-Type = Start, User-Name = "bnglab-selftest", Acct-Session-Id = "bnglab-selftest",
+        NAS-Identifier = "bnglab-selftest"
+  loop_control:
+    label: "{{ item.name }}"
+  register: lab_radius_selftest
+  changed_when: false
+  failed_when: lab_radius_selftest.stdout is not search(item.expect)
+
+- name: Check the accounting record was written
+  ansible.builtin.command: >-
+    pct exec {{ lab_radius_vmid }} -- sh -c 'grep -l bnglab-selftest /var/log/freeradius/radacct/127.0.0.1/detail-*'
+  changed_when: false
+
+- name: Report
+  ansible.builtin.debug:
+    msg: >-
+      FreeRADIUS (CT {{ lab_radius_vmid }}) is answering: {{ lab_subscribers.broadband_pppoe.count }} PPPoE and
+      {{ lab_subscribers.broadband_dhcp.count }} IPoE subscribers loaded. Accounting is in the container under
+      /var/log/freeradius/radacct/<NAS address>/.

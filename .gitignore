@@ -1,0 +1,34 @@
+# Your lab: real inventory, secrets, keys and vendor images never leave your machine
+inventory/*
+!inventory/example/
+vars/*
+!vars/secrets.example.yml
+*.vault
+.vault_pass*
+.env
+*.pem
+*.key
+id_*
+/images/
+*.qcow2
+*.img
+*.img.gz
+*.iso
+
+# Per-run output
+results/*
+!results/README.md
+*.pcap
+
+# Tooling
+.venv
+.ansible/
+collections/ansible_collections
+__pycache__/
+*.pyc
+*.retry
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store

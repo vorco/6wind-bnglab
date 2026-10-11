@@ -1,0 +1,58 @@
+{# IPoE (DHCPv4 and DHCPv6) on every access LAG, on the same QinQ tags as PPPoE.
+   Subscribers authenticate by the remote-id their access network inserts (DHCP option 82.2,
+   DHCPv6 option 37); RADIUS places them in the subscriber L3VRF. #}
+{% set access = lab_links | selectattr('role', 'eq', 'access') | list %}
+{% set subscribers = lab_subscribers.broadband_dhcp.count | int %}
+<config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <config xmlns="urn:6wind:vrouter">
+    <vrf>
+      <name>main</name>
+      <ipoe-server xmlns="urn:6wind:vrouter/ipoe-server" xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" nc:operation="replace">
+        <enabled>true</enabled>
+        {# Each DHCPv4 and DHCPv6 lease is its own single-stack session; aggregation groups a
+           dual-stack subscriber's two sessions under one subscriber (shared QoS and limits). #}
+        <aggregated-sessions>2</aggregated-sessions>
+        <limits><max-session>{{ [subscribers * 2, 1024] | max }}</max-session></limits>
+        <auth>
+          <username>{agent_remote_id}</username>
+          <password>{{ lab_subscribers.broadband_dhcp.password }}</password>
+          <radius>
+{% set coa_port = lab_bng.coa_port_ipoe %}
+{% include '_radius.xml.j2' %}
+          </radius>
+        </auth>
+        <dhcp-server>
+          <ip4-pool>subs-v4</ip4-pool>
+          <ip-pools-setup>
+            <default-local-ip>{{ lab_bng.gateway_ipv4 }}</default-local-ip>
+            <pool><name>subs-v4</name><peer-pool>{{ lab_bng.ipoe.ipv4_pool }}</peer-pool></pool>
+          </ip-pools-setup>
+{% for link in access %}
+          <interface>
+            <name>{{ link.name }}-lag</name>
+            <router>{{ lab_bng.gateway_ipv4 }}</router>
+            <server-id>{{ lab_bng.gateway_ipv4 }}</server-id>
+            <access-mode>L2</access-mode>
+            <subnet-mask>32</subnet-mask>
+          </interface>
+{% endfor %}
+          <lease><lease-time>{{ lab_vsr_dhcp_lease }}</lease-time></lease>
+        </dhcp-server>
+        <dhcpv6-server>
+          <ip6-pool>subs-v6</ip6-pool>
+          <ip6-pools-setup>
+            <pool><name>subs-v6</name><prefix>{{ lab_bng.ipoe.ipv6_pool }}</prefix><prefix-len>64</prefix-len></pool>
+            <prefix-delegation><name>subs-pd</name><prefix>{{ lab_bng.ipoe.ipv6_pd }}</prefix><prefix-len>56</prefix-len></prefix-delegation>
+          </ip6-pools-setup>
+{% for link in access %}
+          <interface><name>{{ link.name }}-lag</name><access-mode>L2</access-mode></interface>
+{% endfor %}
+          <lease><pref-lifetime>{{ lab_vsr_dhcpv6_preferred }}</pref-lifetime><valid-lifetime>{{ lab_vsr_dhcpv6_valid }}</valid-lifetime></lease>
+          <server-id>1:0:0:1</server-id>
+          <ipv6-prefix-delegation>subs-pd</ipv6-prefix-delegation>
+        </dhcpv6-server>
+        <ipv6-neighbor-discovery><enabled>true</enabled></ipv6-neighbor-discovery>
+      </ipoe-server>
+    </vrf>
+  </config>
+</config>

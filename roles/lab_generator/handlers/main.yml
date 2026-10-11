@@ -1,0 +1,9 @@
+- name: Load NIC drivers
+  ansible.builtin.shell: udevadm trigger --subsystem-match=pci --action=add && udevadm settle
+  changed_when: true
+  become: true
+
+- name: Reboot the generator
+  ansible.builtin.reboot:
+    reboot_timeout: 600
+  become: true

@@ -1,0 +1,68 @@
+{# Enterprise customers: a static VLAN interface per customer on its access LAG, in its
+   subscriber L3VRF, with the link addresses and a static route for the routed IPv6 prefix.
+   Untagged handoff: the S-tag interface itself holds the addresses. Tagged handoff: the
+   S-tag interface sits in the main VRF and the C-tag interface on it holds the addresses.
+   Static routes are exported to the core with the subscriber routes. #}
+{% set plan = lab_enterprise | default([]) | bnglab_enterprise_plan(lab_links, lab_access_areas, lab_bng.subscriber_vrfs | map(attribute='name') | list) %}
+<config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <config xmlns="urn:6wind:vrouter">
+    <vrf>
+      <name>main</name>
+      <interface xmlns="urn:6wind:vrouter/interface">
+{% for e in plan | selectattr('c_tag') %}
+        <vlan xmlns="urn:6wind:vrouter/vlan">
+          <name>{{ e.outer_if }}</name>
+          <description>Enterprise {{ e.name }} S-tag</description>
+          <link-interface>{{ e.link }}-lag</link-interface>
+          <vlan-id>{{ e.s_tag }}</vlan-id>
+          <protocol>{{ e.protocol }}</protocol>
+        </vlan>
+{% endfor %}
+      </interface>
+{% for vrf, customers in plan | groupby('vrf') %}
+      <l3vrf>
+        <name>{{ vrf }}</name>
+        <interface xmlns="urn:6wind:vrouter/interface">
+{%   for e in customers %}
+          <vlan xmlns="urn:6wind:vrouter/vlan">
+            <name>{{ e.vsr_if }}</name>
+            <description>Enterprise {{ e.name }}</description>
+{%     if e.c_tag %}
+            <link-interface>{{ e.outer_if }}</link-interface>
+            <vlan-id>{{ e.c_tag }}</vlan-id>
+            <protocol>802.1q</protocol>
+{%     else %}
+            <link-interface>{{ e.link }}-lag</link-interface>
+            <vlan-id>{{ e.s_tag }}</vlan-id>
+            <protocol>{{ e.protocol }}</protocol>
+{%     endif %}
+            <ipv4><address><ip>{{ e.vsr_ipv4 }}</ip></address></ipv4>
+            <ipv6><address><ip>{{ e.vsr_ipv6 }}</ip></address></ipv6>
+          </vlan>
+{%   endfor %}
+        </interface>
+        <routing xmlns="urn:6wind:vrouter/routing">
+          <static>
+{%   for e in customers %}
+            <ipv6-route>
+              <destination>{{ e.routed_ipv6 }}</destination>
+              <next-hop><next-hop>{{ e.cust_ipv6 }}</next-hop></next-hop>
+            </ipv6-route>
+{%   endfor %}
+          </static>
+          <bgp xmlns="urn:6wind:vrouter/bgp">
+            <address-family>
+              <ipv4-unicast>
+                <redistribute><protocol>static</protocol><route-map>bnglab-subscribers-v4</route-map></redistribute>
+              </ipv4-unicast>
+              <ipv6-unicast>
+                <redistribute><protocol>static</protocol><route-map>bnglab-subscribers-v6</route-map></redistribute>
+              </ipv6-unicast>
+            </address-family>
+          </bgp>
+        </routing>
+      </l3vrf>
+{% endfor %}
+    </vrf>
+  </config>
+</config>

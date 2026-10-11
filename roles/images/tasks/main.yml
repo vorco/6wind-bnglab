@@ -1,0 +1,79 @@
+# Stages the VSR qcow2 (from the workstation) and the generator cloud image (downloaded
+# on the host) in the import area of the directory storage. Both copies are skipped
+# when an identical file is already there.
+
+- name: Resolve the VSR image path
+  ansible.builtin.set_fact:
+    images_vsr_path: "{{ vsr_image if vsr_image is abs else (playbook_dir | dirname) ~ '/' ~ vsr_image }}"
+  when: vsr_image is defined and vsr_image | length > 0
+
+- name: Check a VSR image is set
+  ansible.builtin.assert:
+    that: images_vsr_path is defined
+    fail_msg: "Set vsr_image in your inventory, or pass VSR_IMAGE=<path to the 6WIND .qcow2>."
+    quiet: true
+
+- name: Inspect the VSR image
+  ansible.builtin.stat:
+    path: "{{ images_vsr_path }}"
+    checksum_algorithm: sha256
+    get_checksum: "{{ vsr_image_sha256 is defined }}"
+  register: images_vsr_stat
+  delegate_to: localhost
+
+- name: Read the VSR image header
+  ansible.builtin.command: head -c 3 {{ images_vsr_path | quote }}
+  register: images_vsr_magic
+  changed_when: false
+  delegate_to: localhost
+  when: images_vsr_stat.stat.exists
+
+- name: Check the VSR image
+  ansible.builtin.assert:
+    that:
+      - images_vsr_stat.stat.exists
+      - images_vsr_magic.stdout == "QFI"
+      - images_vsr_path is search('\.qcow2$')
+      - vsr_image_sha256 is not defined or images_vsr_stat.stat.checksum == vsr_image_sha256 | lower
+    fail_msg: "{{ images_vsr_path }} must be an existing 6WIND VSR .qcow2 image (matching vsr_image_sha256 when set)."
+    quiet: true
+
+- name: Find the import directory
+  ansible.builtin.command: pvesm path {{ pve_host_dir_storage | default('local') }}:import/probe.qcow2
+  register: images_import_probe
+  changed_when: false
+
+- name: Record where images go
+  ansible.builtin.set_fact:
+    images_import_dir: "{{ images_import_probe.stdout | dirname }}"
+
+- name: Create the import directory
+  ansible.builtin.file:
+    path: "{{ images_import_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Upload the VSR image
+  ansible.builtin.copy:
+    src: "{{ images_vsr_path }}"
+    dest: "{{ images_import_dir }}/{{ images_vsr_path | basename }}"
+    mode: "0644"
+
+# Ubuntu publishes a qcow2 image under a .img name. The import content type only accepts
+# images named by their real format (.qcow2, .raw, .vmdk), and only volumes there (or in
+# 'images') can be used with import-from by volume ID, so save it as .qcow2.
+- name: Download the generator image
+  ansible.builtin.get_url:
+    url: "{{ images_gen_url }}"
+    dest: "{{ images_import_dir }}/{{ images_gen_url | basename | regex_replace('\\.img$', '.qcow2') }}"
+    checksum: "sha256:{{ images_gen_sums_url }}"
+    mode: "0644"
+
+- name: List the staged images
+  ansible.builtin.command: pvesm list {{ pve_host_dir_storage | default('local') }} --content import
+  register: images_list
+  changed_when: false
+
+- name: Show the staged images
+  ansible.builtin.debug:
+    msg: "{{ images_list.stdout_lines }}"

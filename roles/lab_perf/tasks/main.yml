@@ -1,0 +1,117 @@
+# Runs on the generator while lab_sessions holds every subscriber up (no traffic yet). Runs
+# every regular stream at the perf rate for lab_perf_seconds while sampling the VSR's
+# fast-path core load, takes each port's RX queue counters before and after, and writes the
+# report. Reports what was seen; it does not pass or fail. BNG Blaster is always stopped.
+- name: Measure the fast path under load
+  vars:
+    blaster: "{{ role_path }}/../lab_sessions/files/session_test.py"
+    # An empty key file makes vsr_cli.py use the SSH agent and the default keys.
+    vsr_cli: >-
+      {{ [ansible_playbook_python, role_path ~ '/../lab_test/files/vsr_cli.py', lab_mgmt.vsr_ip, vsr_admin_user,
+          lab_ssh_private_key_file | default(hostvars[groups['pve'][0]].ansible_ssh_private_key_file | default(''))] }}
+  block:
+    - name: Wait for BGP and LDP
+      ansible.builtin.script:
+        cmd: "{{ blaster }} --wait-core {{ lab_sessions_dir }}"
+        executable: python3
+      become: true
+      changed_when: false
+
+    - name: Read the RX queue counters before
+      ansible.builtin.command:
+        argv: "{{ vsr_cli + ['show interface hardware-statistics name ' ~ item] }}"
+      loop: "{{ lab_links | map(attribute='name') | list }}"
+      register: lab_perf_queues_before
+      delegate_to: localhost
+      changed_when: false
+
+    - name: Copy the session test to the generator, to run the traffic in the background
+      ansible.builtin.copy:
+        src: "{{ blaster }}"
+        dest: "{{ lab_sessions_dir }}/session_test.py"
+        mode: "0755"
+      become: true
+
+    - name: Start the traffic
+      ansible.builtin.command:
+        argv: [python3, "{{ lab_sessions_dir }}/session_test.py", --streams, "{{ lab_sessions_dir }}", "", "{{ lab_perf_seconds }}"]
+      async: "{{ lab_perf_seconds | int + 300 }}"
+      poll: 0
+      register: lab_perf_streams
+      become: true
+      changed_when: false
+
+    - name: Sample the fast-path cores' load during the traffic
+      ansible.builtin.command:
+        cmd: >-
+          {{ ansible_playbook_python }} {{ role_path }}/../lab_coa/files/vsr_query.py {{ lab_mgmt.vsr_ip }}
+          {{ vsr_admin_user }} cpu {{ lab_perf_seconds | int - 10 }} {{ lab_perf_sample_seconds }}
+        stdin: "{{ vsr_admin_password }}"
+      register: lab_perf_cpu
+      delegate_to: localhost
+      changed_when: false
+
+    - name: Wait for the traffic to finish
+      ansible.builtin.async_status:
+        jid: "{{ lab_perf_streams.ansible_job_id }}"
+      register: lab_perf_run
+      until: lab_perf_run.finished
+      retries: 60
+      delay: 10
+      become: true
+
+    - name: Read the RX queue counters after
+      ansible.builtin.command:
+        argv: "{{ vsr_cli + ['show interface hardware-statistics name ' ~ item] }}"
+      loop: "{{ lab_links | map(attribute='name') | list }}"
+      register: lab_perf_queues_after
+      delegate_to: localhost
+      changed_when: false
+  always:
+    - name: Stop BNG Blaster
+      ansible.builtin.script:
+        cmd: "{{ role_path }}/../lab_sessions/files/session_test.py --stop {{ lab_sessions_dir }}"
+        executable: python3
+      become: true
+      changed_when: false
+      failed_when: false
+
+- name: Read the VSR version
+  ansible.builtin.command:
+    cmd: "{{ ansible_playbook_python }} {{ role_path }}/../lab_coa/files/vsr_query.py {{ lab_mgmt.vsr_ip }} {{ vsr_admin_user }} version"
+    stdin: "{{ vsr_admin_password }}"
+  register: lab_perf_version
+  delegate_to: localhost
+  changed_when: false
+  failed_when: false
+
+- name: Write the report
+  vars:
+    queues_before: >-
+      {{ dict(lab_perf_queues_before.results | map(attribute='item') | zip(lab_perf_queues_before.results | map(attribute='stdout'))) }}
+    queues_after: >-
+      {{ dict(lab_perf_queues_after.results | map(attribute='item') | zip(lab_perf_queues_after.results | map(attribute='stdout'))) }}
+    settings:
+      stamp: "{{ lab_perf_stamp }}"
+      vsr_version: "{{ lab_perf_version.stdout | default('\"unknown\"') | from_json }}"
+      pppoe: "{{ lab_subscribers.broadband_pppoe.count }}"
+      ipoe: "{{ lab_subscribers.broadband_dhcp.count }}"
+      flows: "{{ lab_perf_flows }}"
+      packet_bytes: "{{ lab_perf_packet_bytes | int }}"
+      bps: "{{ lab_perf_bps | int }}"
+      seconds: "{{ lab_perf_seconds | int }}"
+      complete: "{{ lab_sessions_summary.complete | default(0) }}"
+      expected: "{{ lab_sessions_summary.expected | default(0) }}"
+      failed_states: "{{ lab_sessions_summary.failed_states | default({}) }}"
+  ansible.builtin.copy:
+    content: >-
+      {{ lab_perf_cpu.stdout | from_json
+         | bnglab_perf_report(queues_before, queues_after, lab_perf_run.stdout | from_json, settings) }}
+    dest: "{{ lab_perf_dir }}/perf.md"
+    mode: "0644"
+  delegate_to: localhost
+
+- name: Show the report
+  ansible.builtin.debug:
+    msg: "{{ lookup('ansible.builtin.file', lab_perf_dir ~ '/perf.md') }}"
+  delegate_to: localhost

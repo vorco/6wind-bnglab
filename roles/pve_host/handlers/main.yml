@@ -1,0 +1,3 @@
+- name: Refresh the boot loader
+  ansible.builtin.command: "{{ 'proxmox-boot-tool refresh' if pve_host_boot_tool else 'update-grub' }}"
+  changed_when: true

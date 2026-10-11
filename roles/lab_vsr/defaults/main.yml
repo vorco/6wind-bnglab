@@ -1,0 +1,13 @@
+# MTU on the VSR's link ports and LAGs.
+lab_vsr_port_mtu: 9216
+# Seconds to wait for the fast path and link interfaces after a configuration change.
+# A restart usually takes about a minute; the margin covers slow hosts and links.
+lab_vsr_ready_timeout: 900
+# Seconds every readiness check must keep passing before the VSR counts as ready.
+# A fast-path restart starts 10-20 s after the commit returns, so this must be longer.
+lab_vsr_ready_settle: 45
+# DHCP lease times, in seconds, kept short so subscribers renew within a test (DHCPv4
+# renews at half its lease time). Production values are usually much longer.
+lab_vsr_dhcp_lease: 120
+lab_vsr_dhcpv6_preferred: 60
+lab_vsr_dhcpv6_valid: 120

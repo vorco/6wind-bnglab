@@ -1,0 +1,25 @@
+# Enterprise customers: static addressing on their own S-tag, with no session and no RADIUS.
+# They sit in a subscriber L3VRF (vrf, default the first of lab_bng.subscriber_vrfs) and reach
+# the core like subscribers.
+#   s_tag        the customer's own S-tag; its ethertype is the access link's tpid.
+#   c_tag        optional. Set it for a tagged handoff (the VLAN the customer receives on site):
+#                the BNG then sees S-tag + C-tag. Leave it out for an untagged handoff: S-tag only.
+#   link         optional access link (default: the first access link).
+#   vrf          optional subscriber L3VRF (default: the first).
+#   ipv4         the link /31: the VSR takes the first address, the customer the second.
+#   ipv6         the link /64: the VSR takes ::1, the customer ::2.
+#   routed_ipv6  a prefix routed to the customer's link address.
+# Lab-internal addressing: shared address space and IPv6 documentation space.
+lab_enterprise:
+  - name: ent-untagged
+    s_tag: 10
+    ipv4: 100.64.128.0/31
+    ipv6: "2001:db8:500::/64"
+    routed_ipv6: "2001:db8:600::/48"
+  - name: ent-tagged
+    s_tag: 11
+    c_tag: 20
+    vrf: internet-b
+    ipv4: 100.64.128.2/31
+    ipv6: "2001:db8:500:1::/64"
+    routed_ipv6: "2001:db8:601::/48"

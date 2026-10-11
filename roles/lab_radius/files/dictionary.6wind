@@ -1,0 +1,22 @@
+# 6WIND vendor-specific RADIUS attributes (vendor 7336), as listed in the
+# 6WIND VSR RADIUS attribute reference. Used by FreeRADIUS to match and send
+# the attributes the VSR's PPP and IPoE servers understand.
+VENDOR		6WIND				7336
+
+BEGIN-VENDOR	6WIND
+ATTRIBUTE	6WIND-AVPair			1	string
+ATTRIBUTE	6WIND-limit			7	string
+ATTRIBUTE	6WIND-iface-rpf			23	integer
+ATTRIBUTE	6WIND-qos-template-name		24	string
+ATTRIBUTE	6WIND-LI-Action			25	integer
+ATTRIBUTE	6WIND-LI-Identifier		26	integer
+ATTRIBUTE	6WIND-LI-Mediation-Device-IP	27	string
+ATTRIBUTE	6WIND-LI-Mediation-Device-Port	28	integer
+ATTRIBUTE	6WIND-dhcp-remote-id		29	octets
+ATTRIBUTE	6WIND-dhcp-circuit-id		30	octets
+ATTRIBUTE	6WIND-tr069-url			31	string
+ATTRIBUTE	6WIND-DHCP-Router-Option	32	ipaddr
+
+VALUE	6WIND-LI-Action			Disable			0
+VALUE	6WIND-LI-Action			Enable			1
+END-VENDOR	6WIND

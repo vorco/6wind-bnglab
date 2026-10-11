@@ -1,0 +1,118 @@
+# Read-only host checks, plus the optional cable loop test.
+- name: Name this run's results directory
+  ansible.builtin.set_fact:
+    preflight_dir: "{{ preflight_results_root }}/preflight-{{ now(utc=true, fmt='%Y%m%d-%H%M%S') }}"
+
+- name: Create the results directory
+  ansible.builtin.file:
+    path: "{{ preflight_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: localhost
+
+- name: Inspect the host and the link ports
+  ansible.builtin.script:
+    cmd: "host_report.py {{ lab_links | to_json | quote }}"
+    executable: python3
+  register: preflight_report_raw
+  changed_when: false
+
+- name: Parse the host report
+  ansible.builtin.set_fact:
+    preflight_report: "{{ preflight_report_raw.stdout | from_json }}"
+
+- name: Collect host facts for the record
+  ansible.builtin.shell:
+    cmd: "{{ item.value }}"
+    executable: /bin/bash
+  loop: "{{ preflight_fact_commands | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  vars:
+    preflight_fact_commands:
+      cpu: lscpu
+      memory: free -g; grep -i huge /proc/meminfo
+      proxmox: pveversion -v; pvesm status; qm list; pct list
+      boot: cat /proc/cmdline; proxmox-boot-tool status 2>&1 || true
+      nics: lspci -D -nn | grep -i ethernet; ip -br link
+      iommu-groups: for g in /sys/kernel/iommu_groups/*; do echo "group ${g##*/}:" $(ls "$g/devices"); done | sort -V
+  register: preflight_facts
+  changed_when: false
+  failed_when: false
+
+- name: Save the host report
+  ansible.builtin.copy:
+    content: "{{ preflight_report | to_nice_json }}\n"
+    dest: "{{ preflight_dir }}/host-report.json"
+    mode: "0644"
+  delegate_to: localhost
+
+- name: Save the host facts
+  ansible.builtin.copy:
+    content: "{{ item.stdout }}\n{{ item.stderr }}"
+    dest: "{{ preflight_dir }}/{{ item.item.key }}.txt"
+    mode: "0644"
+  loop: "{{ preflight_facts.results }}"
+  loop_control:
+    label: "{{ item.item.key }}"
+  delegate_to: localhost
+
+- name: Choose which links can be loop tested
+  ansible.builtin.set_fact:
+    preflight_loop_links: "{{ preflight_loop_links | default([]) + [entry] }}"
+  loop: "{{ lab_links }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    devs: "{{ preflight_report.devices | items2dict(key_name='pci', value_name='netdevs') }}"
+    drivers: "{{ preflight_report.devices | items2dict(key_name='pci', value_name='driver') }}"
+    testable: >-
+      {{ (preflight_loop_test | string | lower) in ['true', 'yes', '1']
+         and devs[item.bng_pci] | default([]) | length == 1 and devs[item.gen_pci] | default([]) | length == 1
+         and drivers[item.bng_pci] not in [none, 'vfio-pci'] and drivers[item.gen_pci] not in [none, 'vfio-pci'] }}
+    entry:
+      name: "{{ item.name }}"
+      testable: "{{ testable }}"
+      bng_if: "{{ devs[item.bng_pci] | default([]) | first | default('') }}"
+      gen_if: "{{ devs[item.gen_pci] | default([]) | first | default('') }}"
+      skip_reason: >-
+        {{ 'loop test disabled' if (preflight_loop_test | string | lower) not in ['true', 'yes', '1']
+           else 'a port has no host network driver (for example bound to vfio-pci)' }}
+
+- name: Test each cable loop
+  ansible.builtin.script:
+    cmd: "loop_test.sh {{ item.bng_if }} {{ item.gen_if }} {{ preflight_carrier_timeout }}"
+  loop: "{{ preflight_loop_links | selectattr('testable') | list }}"
+  loop_control:
+    label: "{{ item.name }}: {{ item.bng_if }} <-> {{ item.gen_if }}"
+  when: preflight_report.problems | length == 0
+  register: preflight_loops
+  changed_when: false
+  failed_when: false
+
+- name: Write the preflight summary
+  ansible.builtin.template:
+    src: summary.md.j2
+    dest: "{{ preflight_dir }}/summary.md"
+    mode: "0644"
+  delegate_to: localhost
+
+- name: Show warnings
+  ansible.builtin.debug:
+    msg: "{{ preflight_report.warnings + skipped }}"
+  vars:
+    skipped: "{{ preflight_loop_links | rejectattr('testable') | map(attribute='name')
+                 | map('regex_replace', '^(.*)$', 'Loop test skipped for \\1') | list }}"
+  when: (preflight_report.warnings + skipped) | length > 0
+
+- name: Check the host is ready for the lab
+  ansible.builtin.assert:
+    that:
+      - preflight_report.problems | length == 0
+      - failed_loops | length == 0
+    fail_msg: "{{ preflight_report.problems + failed_loops + ['Details: ' ~ preflight_dir ~ '/summary.md'] }}"
+    success_msg: "Preflight passed. Details: {{ preflight_dir }}/summary.md"
+  vars:
+    failed_loops: "{{ preflight_loops.results | default([]) | rejectattr('skipped', 'defined')
+                      | rejectattr('rc', 'eq', 0)
+                      | map(attribute='item.name') | map('regex_replace', '^(.*)$', 'Link \\1 is not looped: see summary.md') | list }}"

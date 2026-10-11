@@ -1,0 +1,13 @@
+# make test: {{ lab_test_stamp | default('') }}
+
+VSR {{ vsr_version }} · BNG Blaster {{ bb_version | regex_replace('^.*Version:?\s*', '') }} ·
+{{ lab_subscribers.broadband_pppoe.count }} PPPoE and {{ lab_subscribers.broadband_dhcp.count }} IPoE subscribers,
+{{ lab_enterprise | default([]) | length }} enterprise customers, {{ lab_bng.subscriber_vrfs | length }} subscriber L3VRFs
+
+**{{ lab_test_results | selectattr('passed') | list | length }} of {{ lab_test_results | length }} tests passed.**
+
+| # | Test | Result | Detail |
+|---|---|---|---|
+{% for r in lab_test_results | sort(attribute='id') %}
+| {{ r.id }} | {{ r.name }} | {{ 'pass' if r.passed else '**FAIL**' }} | {{ r.detail | replace('|', '/') }} |
+{% endfor %}

@@ -1,0 +1,26 @@
+# Prepares the BNG Blaster generator VM. Run after make vms.
+- name: Check the lab inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    lab_check_secrets: false
+  roles:
+    - lab_inventory
+  tasks:
+    - name: Add the generator to this run's inventory
+      ansible.builtin.add_host:
+        name: bnglab-gen
+        groups: [lab_gen]
+        ansible_host: "{{ lab_mgmt.gen_ip }}"
+        ansible_user: lab
+        ansible_ssh_private_key_file: "{{ hostvars[groups['pve'][0]].ansible_ssh_private_key_file | default(omit) }}"
+        ansible_ssh_common_args: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        ansible_python_interpreter: /usr/bin/python3
+      changed_when: false
+
+- name: Prepare the generator
+  hosts: lab_gen
+  gather_facts: false
+  roles:
+    - lab_generator

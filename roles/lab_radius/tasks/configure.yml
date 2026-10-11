@@ -1,0 +1,69 @@
+# Stages the configuration on the host, pushes whatever differs into the container,
+# and restarts the container (and so FreeRADIUS) when anything was pushed.
+
+- name: Create the staging directory
+  ansible.builtin.file:
+    path: "{{ lab_radius_stage }}"
+    state: directory
+    mode: "0700"
+
+- name: Stage the dictionaries
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ lab_radius_stage }}/{{ item }}"
+    mode: "0600"
+  loop: [dictionary, dictionary.6wind]
+
+- name: Stage the configuration
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "{{ lab_radius_stage }}/{{ item }}"
+    mode: "0600"
+  loop: [clients.conf, authorize]
+
+- name: Stage the radclient secrets
+  ansible.builtin.copy:
+    content: "{{ item.secret }}\n"
+    dest: "{{ lab_radius_stage }}/{{ item.name }}"
+    mode: "0600"
+  loop:
+    - {name: radius-secret, secret: "{{ radius_shared_secret }}"}
+    - {name: coa-secret, secret: "{{ radius_coa_secret }}"}
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true
+
+- name: Push changed files into the container
+  ansible.builtin.shell: |
+    set -euo pipefail
+    ct={{ lab_radius_vmid }}
+    pct exec "$ct" -- mkdir -p /etc/freeradius/bnglab
+    gid=$(pct exec "$ct" -- id -g freerad)
+    push() {  # staged-file  container-path  mode  group
+      want=$(sha256sum "{{ lab_radius_stage }}/$1" | cut -d' ' -f1)
+      have=$(pct exec "$ct" -- sha256sum "$2" 2>/dev/null | cut -d' ' -f1 || true)
+      if [ "$want" != "$have" ]; then
+        pct push "$ct" "{{ lab_radius_stage }}/$1" "$2" --perms "$3" --user 0 --group "$4"
+        echo "pushed $2"
+      fi
+    }
+    push clients.conf     /etc/freeradius/clients.conf                 0640 "$gid"
+    push dictionary       /etc/freeradius/dictionary                   0644 0
+    push dictionary.6wind /etc/freeradius/dictionary.6wind             0644 0
+    push authorize        /etc/freeradius/mods-config/files/authorize  0644 0
+    push radius-secret    /etc/freeradius/bnglab/radius-secret         0600 0
+    push coa-secret       /etc/freeradius/bnglab/coa-secret            0600 0
+  args:
+    executable: /bin/bash
+  register: lab_radius_push
+  changed_when: lab_radius_push.stdout | length > 0
+  notify: Restart FreeRADIUS
+
+- name: Install the CoA and Disconnect helper on the host
+  ansible.builtin.template:
+    src: bnglab-coa.j2
+    dest: /usr/local/sbin/bnglab-coa
+    mode: "0700"
+
+- name: Apply configuration changes
+  ansible.builtin.meta: flush_handlers

@@ -1,0 +1,70 @@
+# Turns on the VSR's CoA and Disconnect servers (part of the PPP and IPoE server config) and
+# proves them: BNG Blaster holds every subscriber up while the RADIUS container sends a
+# rate-limit CoA and Disconnect requests, checked in the VSR's session table and BNG Blaster.
+# Run after make access.
+- name: Check the lab inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - lab_inventory
+  tasks:
+    - name: Add the VSR and the generator to this run's inventory
+      ansible.builtin.add_host:
+        name: "{{ item.name }}"
+        groups: ["{{ item.group }}"]
+        ansible_host: "{{ item.ip }}"
+        ansible_user: "{{ item.user }}"
+        ansible_password: "{{ item.password | default(omit) }}"
+        ansible_connection: "{{ item.connection }}"
+        ansible_network_os: "{{ item.network_os | default(omit) }}"
+        ansible_port: "{{ item.port }}"
+        ansible_ssh_private_key_file: "{{ hostvars[groups['pve'][0]].ansible_ssh_private_key_file | default(omit) }}"
+        ansible_ssh_common_args: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        ansible_python_interpreter: /usr/bin/python3
+      loop:
+        - {name: bnglab-vsr, group: lab_vsr, ip: "{{ lab_mgmt.vsr_ip }}", user: "{{ vsr_admin_user }}",
+           password: "{{ vsr_admin_password }}", connection: ansible.netcommon.netconf, network_os: default, port: 830}
+        - {name: bnglab-gen, group: lab_gen, ip: "{{ lab_mgmt.gen_ip }}", user: lab, connection: ssh, port: 22}
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: false
+      no_log: true
+
+- name: Refresh RADIUS and the CoA helper
+  hosts: pve
+  gather_facts: false
+  pre_tasks:
+    - name: Load the secrets
+      ansible.builtin.include_vars:
+        file: "{{ lab_secrets_file }}"
+      no_log: true
+  roles:
+    - lab_radius
+
+- name: Configure the VSR's PPP and IPoE servers, with their CoA servers
+  hosts: lab_vsr
+  gather_facts: false
+  pre_tasks:
+    - name: Load the secrets
+      ansible.builtin.include_vars:
+        file: "{{ lab_secrets_file }}"
+      no_log: true
+  roles:
+    - role: lab_vsr
+      vars:
+        lab_vsr_parts: [ppp_server, ipoe_server]
+
+- name: Hold every subscriber up and test CoA and Disconnect
+  hosts: lab_gen
+  gather_facts: false
+  pre_tasks:
+    - name: Load the secrets
+      ansible.builtin.include_vars:
+        file: "{{ lab_secrets_file }}"
+      no_log: true
+  roles:
+    - role: lab_sessions
+      vars:
+        lab_sessions_hold: true
+    - lab_coa

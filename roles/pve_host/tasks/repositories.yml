@@ -1,0 +1,36 @@
+- name: Read the subscription status
+  ansible.builtin.command: pvesubscription get
+  register: pve_host_subscription
+  changed_when: false
+
+- name: Replace the enterprise repositories
+  when: pve_host_subscription.stdout is not search('(?m)^status:\s*active', ignorecase=true)
+  block:
+    - name: Find the enterprise repositories
+      ansible.builtin.find:
+        paths: /etc/apt/sources.list.d
+        patterns: "*.sources"
+        contains: '.*enterprise\.proxmox\.com'
+      register: pve_host_enterprise
+
+    - name: Disable the enterprise repositories
+      ansible.builtin.lineinfile:
+        path: "{{ item.path }}"
+        regexp: '^Enabled:'
+        line: "Enabled: false"
+      loop: "{{ pve_host_enterprise.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: Add the no-subscription repository
+      ansible.builtin.template:
+        src: proxmox.sources.j2
+        dest: /etc/apt/sources.list.d/proxmox.sources
+        mode: "0644"
+      vars:
+        pve_host_codename: "{{ pve_host_os.stdout }}"
+
+    - name: Check the repositories work
+      ansible.builtin.apt:
+        update_cache: true
+      changed_when: false

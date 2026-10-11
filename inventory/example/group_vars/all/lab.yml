@@ -1,0 +1,40 @@
+# Lab layout. Every address here is from a documentation range: replace them all.
+
+# Management network: a Proxmox bridge shared by the VSR, the generator and RADIUS.
+# The VSR activates its licence online over this network, so it needs DNS and internet access.
+lab_mgmt:
+  bridge: vmbr0
+  prefix: 24
+  gateway: 192.0.2.1
+  dns: [192.0.2.53]
+  ntp: [pool.ntp.org]
+  timezone: Etc/UTC
+  vsr_ip: 192.0.2.20
+  gen_ip: 192.0.2.21
+  radius_ip: 192.0.2.22
+
+# Looped links: one entry per physical cable between two NIC ports on the host.
+# bng_pci is passed through to the VSR, gen_pci to the generator.
+# role: access (subscriber-facing, one or more) or core (network-facing, exactly one).
+# tpid (access links only): the ethertype of every S-tag on the port, "0x8100" (default) or "0x88a8".
+# Find PCI addresses with: lspci -D | grep -i ethernet
+lab_links:
+  - name: access1
+    role: access
+    tpid: "0x8100"
+    bng_pci: "0000:01:00.0"
+    gen_pci: "0000:02:00.0"
+  - name: core
+    role: core
+    bng_pci: "0000:01:00.1"
+    gen_pci: "0000:02:00.1"
+
+# 6WIND VSR image (.qcow2) on this workstation, from your 6WIND support portal.
+# Relative paths are from the repository root. Override per run with make ... VSR_IMAGE=<path>.
+vsr_image: images/6wind-vsr-x86_64-<version>.qcow2
+# Optional: the image's sha256, checked before upload.
+# vsr_image_sha256: "<sha256>"
+
+# Optional: the private key make test and make perf use to log in to the VSR, matching one
+# of lab_ssh_public_keys. Unset or empty uses your SSH agent and default keys.
+# lab_ssh_private_key_file: ~/.ssh/bnglab_ed25519

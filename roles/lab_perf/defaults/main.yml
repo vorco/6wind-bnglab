@@ -1,0 +1,9 @@
+# Where the run's report goes, on the controller (set by the playbook).
+lab_perf_dir: "{{ playbook_dir }}/../results/perf"
+# Total rate offered across every flow, both directions, in bits per second (IP layer).
+lab_perf_bps: 1000000000
+# Seconds of traffic, and how often to sample the fast-path cores' load.
+lab_perf_seconds: 180
+lab_perf_sample_seconds: 5
+# IP packet length of the perf traffic, in bytes.
+lab_perf_packet_bytes: 1000

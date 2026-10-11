@@ -1,0 +1,43 @@
+# Managed by 6wind-bnglab: generated from lab_subscribers, lab_access_areas and lab_bng. Do not edit.
+{# Every subscriber is placed in its subscriber L3VRF, which the VSR only takes from RADIUS.
+   The remote-id is the immutable line identifier, so it is what proves the VSR passes the
+   access network's identifiers through: a PPPoE subscriber must also arrive with its
+   remote-id, and an IPoE subscriber is authenticated by it. The circuit-id is informative
+   only and is not checked. RADIUS-addressed subscribers also get their IPv4 address,
+   delegated prefix and any routed subnet from here; the rest use the VSR's pools. #}
+{% set plan = lab_subscribers | bnglab_subscribers(lab_access_areas, lab_links | selectattr('role', 'eq', 'access') | list,
+                                                   lab_rsp_code | default('RSP'), lab_bng) %}
+{% macro reply(p) %}
+	Acct-Interim-Interval = {{ lab_radius_acct_interim }},
+{%   if p.framed_ip %}
+	Framed-IP-Address = {{ p.framed_ip }},
+{%   endif %}
+{%   if p.delegated_prefix %}
+	Delegated-IPv6-Prefix = {{ p.delegated_prefix }},
+{%   endif %}
+{%   if p.framed_route %}
+	Framed-Route = "{{ p.framed_route }}",
+{%   endif %}
+{%   if p.rate_limit_mbps %}
+	6WIND-limit = "in={{ p.rate_limit_mbps }} {{ lab_subscribers.rate_limited.burst }} 0 0 mbps",
+	6WIND-limit = "out={{ p.rate_limit_mbps }} {{ lab_subscribers.rate_limited.burst }} 0 0 mbps",
+{%   endif %}
+	6WIND-AVPair = "l3vrf={{ p.vrf }}"
+{%- endmacro %}
+
+# broadband-pppoe: authenticated by PPP username and password, and required to carry
+# their remote-id (ADSL-Agent-Remote-Id).
+{% for p in plan | selectattr('type', 'eq', 'pppoe') %}
+"{{ p.username }}"	Cleartext-Password := "{{ lab_subscribers.broadband_pppoe.password }}", ADSL-Agent-Remote-Id == "{{ p.remote_id }}"
+{{ reply(p) }}
+
+{% endfor %}
+# broadband-dhcp: authenticated by remote-id. One entry answers both of a subscriber's
+# sessions (DHCPv4 and DHCPv6), each with the attributes for its own address family.
+{% for p in plan | selectattr('type', 'eq', 'ipoe') %}
+"{{ p.username }}"	Cleartext-Password := "{{ lab_subscribers.broadband_dhcp.password }}"
+{{ reply(p) }}
+
+{% endfor %}
+DEFAULT	Auth-Type := Reject
+	Reply-Message = "Not a lab subscriber, or not on its line"

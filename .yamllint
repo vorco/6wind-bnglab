@@ -1,0 +1,24 @@
+---
+extends: default
+ignore: |
+  .venv/
+  collections/ansible_collections/
+  .ansible/
+  results/
+rules:
+  braces:
+    max-spaces-inside: 1
+  brackets:
+    max-spaces-inside: 1
+  line-length:
+    max: 140
+  truthy:
+    allowed-values: ["true", "false"]
+    check-keys: false
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: disable
+  document-start: disable
+  octal-values:
+    forbid-implicit-octal: true
+    forbid-explicit-octal: true

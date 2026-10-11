@@ -1,0 +1,13 @@
+# Managed by 6wind-bnglab.
+client localhost {
+	ipaddr = 127.0.0.1
+	secret = {{ radius_shared_secret }}
+}
+
+# Lab client: Message-Authenticator not required (see docs/known-issues.md).
+client bnglab-vsr {
+	ipaddr = {{ lab_mgmt.vsr_ip }}
+	secret = {{ radius_shared_secret }}
+	shortname = bnglab-vsr
+	require_message_authenticator = no
+}

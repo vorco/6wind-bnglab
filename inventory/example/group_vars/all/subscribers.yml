@@ -1,0 +1,22 @@
+# Lab subscribers. RADIUS, the VSR and the generator all build their identities
+# from these, so they always agree. {n} is the subscriber number, starting at 1.
+# IPoE subscribers are identified by the remote-id their area's provider inserts
+# (see lab_access_areas and regions/).
+# These are test identities, not secrets.
+lab_subscribers:
+  broadband_pppoe:
+    count: 10
+    username: "pppoe{n}@bnglab.example"
+    password: "bnglab"
+  broadband_dhcp:
+    count: 10
+    # User-Password the VSR sends for IPoE subscribers.
+    password: "bnglab"
+  # The subscriber of each type (by {n}) that RADIUS gives a rate limit at login, the
+  # limit in Mbps (both directions), the limit make test changes it to by CoA, and the
+  # committed burst size in bytes (6WIND-limit is "cir cbs eir ebs unit").
+  rate_limited:
+    n: 2
+    mbps: 50
+    coa_mbps: 100
+    burst: 125000

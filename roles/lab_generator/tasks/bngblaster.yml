@@ -1,0 +1,53 @@
+# libdict from rtbrick's release packages, then BNG Blaster from source at a fixed ref.
+- name: Download libdict
+  ansible.builtin.get_url:
+    url: "{{ lab_generator_libdict_url }}"
+    dest: /var/tmp/libdict.zip
+    checksum: "sha256:{{ lab_generator_libdict_sha256 }}"
+    mode: "0644"
+  become: true
+
+- name: Unpack libdict
+  ansible.builtin.unarchive:
+    src: /var/tmp/libdict.zip
+    dest: /var/tmp
+    remote_src: true
+    creates: /var/tmp/libdict-dev_1.0.6_amd64.deb
+  become: true
+
+- name: Install libdict
+  ansible.builtin.apt:
+    deb: "/var/tmp/{{ item }}"
+  loop: [libdict_1.0.6_amd64.deb, libdict-dev_1.0.6_amd64.deb]
+  become: true
+
+- name: Fetch the BNG Blaster source
+  ansible.builtin.git:
+    repo: "{{ lab_generator_bngblaster_repo }}"
+    dest: "{{ lab_generator_src }}/src"
+    version: "{{ lab_generator_bngblaster_ref }}"
+    force: true
+  become: true
+  register: lab_generator_git
+
+- name: Read the commit BNG Blaster was last built from
+  ansible.builtin.slurp:
+    src: "{{ lab_generator_src }}/built-commit"
+  register: lab_generator_built
+  failed_when: false
+  become: true
+
+- name: Build and install BNG Blaster
+  ansible.builtin.shell: |
+    set -euo pipefail
+    cd {{ lab_generator_src }}/src
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBNGBLASTER_TESTS=OFF \
+      -DGIT_REF={{ lab_generator_bngblaster_ref | quote }} -DGIT_SHA={{ lab_generator_git.after }}
+    cmake --build build -j "$(nproc)"
+    cmake --install build
+    echo {{ lab_generator_git.after }} > {{ lab_generator_src }}/built-commit
+  args:
+    executable: /bin/bash
+  when: (lab_generator_built.content | default('') | b64decode | trim) != lab_generator_git.after
+  changed_when: true
+  become: true

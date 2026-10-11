@@ -1,0 +1,184 @@
+{# BNG Blaster subscribers: one access block per lab subscriber, with the S-tag and C-tag
+   it is placed on and the identifiers its area's provider inserts (bnglab_subscribers).
+   PPPoE carries them as intermediate-agent tags; IPoE as DHCP option 82 and, through the
+   LDRA, DHCPv6 options 37 and 18. #}
+{% set access_links = lab_links | selectattr('role', 'eq', 'access') | map(attribute='name') | list %}
+{% set plan = lab_subscribers | bnglab_subscribers(lab_access_areas, lab_links | selectattr('role', 'eq', 'access') | list,
+                                                   lab_rsp_code | default('RSP'), lab_bng) %}
+{% set pppoe = lab_subscribers.broadband_pppoe %}
+{% set dhcp = lab_subscribers.broadband_dhcp %}
+{% set blocks, lags, links, groups = [], [], [], {} %}
+{% set vrf_names = lab_bng.subscriber_vrfs | map(attribute='name') | list %}
+{% for name in access_links %}
+{%   set _ = lags.append({'interface': name ~ '-lag', 'lacp': true, 'lacp-timeout-short': true}) %}
+{%   set _ = links.append({'interface': name, 'lag-interface': name ~ '-lag'}) %}
+{% endfor %}
+{% for p in plan %}
+{#   Streams come in groups, one per VRF and type (the VPN labels differ per VRF). A
+     subscriber with a routed subnet, or one make test uses for rate or accounting checks,
+     gets a group of its own, for the extra streams. #}
+{%   set accounting_mbps = lab_test.accounting.mbps
+       if lab_sessions_test | bool and p.n == lab_test.accounting.n | int else 0 %}
+{%   set rate = p.rate_limit_mbps if lab_sessions_test | bool else 0 %}
+{%   if p.framed_route or rate or accounting_mbps %}
+{%     set group = 100 + loop.index %}
+{%   else %}
+{%     set group = vrf_names.index(p.vrf) * 2 + (1 if p.type == 'pppoe' else 2) %}
+{%   endif %}
+{%   set _ = groups.update({group: {'type': p.type, 'vrf': p.vrf, 'framed_route': p.framed_route,
+                                     'rate': rate, 'accounting_mbps': accounting_mbps}}) %}
+{%   set block = {
+       'interface': p.link ~ '-lag',
+       'type': p.type,
+       'qinq': p.tpid == '0x88a8',
+       'outer-vlan': p.s_tag,
+       'inner-vlan-min': p.c_tag,
+       'inner-vlan-max': p.c_tag,
+       'agent-remote-id': p.remote_id,
+       'agent-circuit-id': p.circuit_id,
+       'stream-group-id': group
+     } %}
+{%   if p.type == 'pppoe' %}
+{#     PPPoE carries DHCPv6 (prefix delegation) inside the PPP session: no relay agent. #}
+{%     set _ = block.update({'username': p.username, 'password': pppoe.password, 'dhcpv6-ldra': false}) %}
+{%   else %}
+{%     set _ = block.update({'dhcpv6-ldra': true}) %}
+{%   endif %}
+{%   set _ = blocks.append(block) %}
+{% endfor %}
+{% set config = {
+  'interfaces': {
+    'io-mode': 'packet_mmap_raw',
+    'lag': lags,
+    'links': links,
+    'access': blocks
+  },
+  'sessions': {
+    'count': pppoe.count | int + dhcp.count | int,
+    'start-rate': lab_sessions_start_rate | int,
+    'stop-rate': lab_sessions_stop_rate | int,
+    'reconnect': false
+  },
+  'ppp': {
+    'mru': 1492,
+    'authentication': {'protocol': 'PAP', 'username': 'unset', 'password': 'unset'},
+    'ipcp': {'enable': true},
+    'ip6cp': {'enable': true}
+  },
+  'dhcp': {'enable': true, 'access-line': true},
+  'dhcpv6': {'enable': true, 'ia-na': true, 'ia-pd': true, 'access-line': true}
+} %}
+{% if lab_sessions_core | bool %}
+{#   The core: BNG Blaster is the provider network on the core link. OSPF carries its
+     loopback, LDP gives that loopback an implicit-null label, and iBGP announces VPN default
+     routes. Subscriber streams run to the "internet" with the VSR's VPN label downstream and
+     the core's label expected upstream. Streams start only once BGP and LDP are up. #}
+{%   set c = lab_core %}
+{%   set core_link = lab_links | selectattr('role', 'eq', 'core') | first %}
+{%   set vsr_ip = c.link | ansible.utils.ipaddr('0') | ansible.utils.ipaddr('address') %}
+{%   set gen_ip = c.link | ansible.utils.ipaddr('1') | ansible.utils.ipaddr('address') %}
+{%   set plen = c.link | ansible.utils.ipaddr('prefix') %}
+{%   set _ = config.interfaces.update({'network': [{
+       'interface': core_link.name,
+       'address': gen_ip ~ '/' ~ plen, 'gateway': vsr_ip,
+       'address-ipv6': '::ffff:' ~ gen_ip ~ '/' ~ (96 + plen | int), 'gateway-ipv6': '::ffff:' ~ vsr_ip,
+       'mtu': c.mtu, 'ospfv2-instance-id': 1, 'ldp-instance-id': 1}]}) %}
+{%   set _ = config.update({
+       'ospf': [{'instance-id': 1, 'router-id': c.gen_loopback, 'area': '0.0.0.0'}],
+       'ldp': [{'instance-id': 1, 'lsr-id': c.gen_loopback, 'raw-update-file': lab_sessions_dir ~ '/core.ldp'}],
+       'bgp': [{'network-interface': core_link.name, 'local-address': c.gen_loopback, 'id': c.gen_loopback,
+                'local-as': c.as, 'peer-as': c.as, 'peer-address': c.vsr_loopback,
+                'family': ['ipv4-vpn-unicast', 'ipv6-vpn-unicast'],
+                'raw-update-file': lab_sessions_dir ~ '/core.bgp'}]}) %}
+{#   One stream per direction: BNG Blaster applies rx-label1 to both directions of a
+     bidirectional stream, so downstream (unlabelled at the access side) would never verify.
+     Stream names carry the type, family and VRF, so results show each VRF separately. #}
+{%   set common = {'pps': lab_sessions_pps | float, 'autostart': false, 'network-interface': core_link.name}
+                  | combine({'length': lab_sessions_length | int} if lab_sessions_length | int else {}) %}
+{%   set v4 = {'network-ipv4-address': c.internet_ipv4} %}
+{%   set v6 = {'network-ipv6-address': c.internet_ipv6} %}
+{%   set streams = [] %}
+{%   for group, g in groups.items() %}
+{%     set vpn = c.vrfs | selectattr('name', 'eq', g.vrf) | first %}
+{%     set families = [('ipv4', 'ipv4', v4, {}), ('ipv6', 'ipv6', v6, {})] %}
+{%     if g.type == 'ipoe' %}
+{%       set _ = families.append(('ipv6pd', 'ipv6pd', v6, {})) %}
+{%     endif %}
+{%     if g.framed_route %}
+{#       A routed subnet (Framed-Route): traffic to and from an address inside it. #}
+{%       set host = g.framed_route | ansible.utils.ipaddr('1') | ansible.utils.ipaddr('address') %}
+{%       set _ = families.append(('routed', 'ipv4', v4, {'up': {'access-ipv4-source-address': host},
+                                                       'down': {'destination-ipv4-address': host}})) %}
+{%     endif %}
+{#     make test's extra streams, named test-*, start only when a check starts them: the rate
+       checks run over the login limit (120%), under it (80%) and over the CoA limit (110%);
+       the accounting check runs a fixed rate. A subscriber's limit covers its IPv4 and IPv6
+       traffic together (one PPPoE session; an IPoE subscriber's aggregated sessions), so the
+       rate load is split between the families. Each accounted session carries the full rate. #}
+{%     set tests = [] %}
+{%     if g.rate %}
+{%       for level, mbps in [('over', g.rate * 1.2), ('under', g.rate * 0.8),
+                             ('coa', lab_subscribers.rate_limited.coa_mbps * 1.1)] %}
+{%         set _ = tests.append(('rate-' ~ level, mbps / 2)) %}
+{%       endfor %}
+{%     endif %}
+{%     if g.accounting_mbps %}
+{%       set _ = tests.append(('volume', g.accounting_mbps / (2 if g.type == 'pppoe' else 1))) %}
+{%     endif %}
+{%     for test, mbps in tests %}
+{%       for family, type, remote in [('ipv4', 'ipv4', v4), ('ipv6', 'ipv6', v6)] %}
+{%         set vpn_label = vpn.vsr_label_ipv4 if type == 'ipv4' else vpn.vsr_label_ipv6 %}
+{%         set gen_label = vpn.gen_label_ipv4 if type == 'ipv4' else vpn.gen_label_ipv6 %}
+{%         set base = common | combine(remote, {'stream-group-id': group, 'type': type,
+                                                'bps': (mbps * 1000000) | int, 'length': 1000}) %}
+{%         set base = base | dict2items | rejectattr('key', 'eq', 'pps') | items2dict %}
+{%         set name = 'test-' ~ test ~ '-' ~ g.type ~ '-' ~ family %}
+{%         set _ = streams.append(base | combine({'name': name ~ '-down', 'direction': 'downstream', 'tx-label1': vpn_label})) %}
+{%         set _ = streams.append(base | combine({'name': name ~ '-up', 'direction': 'upstream', 'rx-label1': gen_label})) %}
+{%       endfor %}
+{%     endfor %}
+{%     for family, type, remote, extra in families %}
+{%       set name = g.type ~ '-' ~ family ~ '-' ~ g.vrf %}
+{%       set label_vsr = vpn.vsr_label_ipv4 if type == 'ipv4' else vpn.vsr_label_ipv6 %}
+{%       set label_gen = vpn.gen_label_ipv4 if type == 'ipv4' else vpn.gen_label_ipv6 %}
+{%       set base = common | combine(remote, {'stream-group-id': group, 'type': type}) %}
+{%       set _ = streams.append(base | combine(extra.down | default({}),
+           {'name': name ~ '-down', 'direction': 'downstream', 'tx-label1': label_vsr})) %}
+{%       set _ = streams.append(base | combine(extra.up | default({}),
+           {'name': name ~ '-up', 'direction': 'upstream', 'rx-label1': label_gen})) %}
+{%     endfor %}
+{%   endfor %}
+{%   if lab_sessions_enterprise | bool %}
+{#     Enterprise customers: a network interface per customer on its access LAG, tagged as the
+       VSR expects (S-tag, plus C-tag for a tagged handoff), and session-less ("RAW") streams
+       between the customer and the internet through the core. BNG Blaster names a VLAN
+       network interface <interface>:<outer VLAN>, which is unique because every customer has
+       its own S-tag. IPv6 runs from an address inside the customer's routed prefix.
+       BNG Blaster can't send a single 0x88a8 tag from a network interface (qinq needs an
+       inner VLAN), so an untagged handoff on a 0x88a8 link is configured on the VSR but
+       not emulated here. #}
+{%     for e in lab_enterprise | default([]) | bnglab_enterprise_plan(lab_links, lab_access_areas, lab_bng.subscriber_vrfs | map(attribute='name') | list)
+          if e.c_tag or e.tpid != '0x88a8' %}
+{%       set ent_if = e.link ~ '-lag:' ~ e.s_tag %}
+{%       set _ = config.interfaces.network.append({
+           'interface': e.link ~ '-lag', 'vlan': e.s_tag, 'inner-vlan': e.c_tag or 0, 'qinq': e.tpid == '0x88a8',
+           'address': e.cust_ipv4 ~ '/31', 'gateway': e.vsr_ipv4 | ansible.utils.ipaddr('address'),
+           'address-ipv6': e.cust_ipv6 ~ '/64', 'gateway-ipv6': e.vsr_ipv6 | ansible.utils.ipaddr('address')}) %}
+{%       set raw = {'pps': lab_sessions_pps | float, 'autostart': false, 'stream-group-id': 0}
+                     | combine({'length': lab_sessions_length | int} if lab_sessions_length | int else {}) %}
+{%       set vpn = c.vrfs | selectattr('name', 'eq', e.vrf) | first %}
+{%       set _ = streams.extend([
+           raw | combine({'name': e.name ~ '-ipv4-down', 'type': 'ipv4', 'network-interface': core_link.name,
+                          'destination-ipv4-address': e.cust_ipv4, 'tx-label1': vpn.vsr_label_ipv4}),
+           raw | combine({'name': e.name ~ '-ipv6-down', 'type': 'ipv6', 'network-interface': core_link.name,
+                          'destination-ipv6-address': e.routed_ipv6_host, 'tx-label1': vpn.vsr_label_ipv6}),
+           raw | combine({'name': e.name ~ '-ipv4-up', 'type': 'ipv4', 'network-interface': ent_if,
+                          'destination-ipv4-address': c.internet_ipv4, 'rx-label1': vpn.gen_label_ipv4}),
+           raw | combine({'name': e.name ~ '-ipv6-up', 'type': 'ipv6', 'network-interface': ent_if,
+                          'network-ipv6-address': e.routed_ipv6_host,
+                          'destination-ipv6-address': c.internet_ipv6, 'rx-label1': vpn.gen_label_ipv6})]) %}
+{%     endfor %}
+{%   endif %}
+{%   set _ = config.update({'streams': streams}) %}
+{% endif %}
+{{ config | to_nice_json(indent=2) }}

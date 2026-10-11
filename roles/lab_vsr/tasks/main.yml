@@ -1,0 +1,53 @@
+# Runs against the VSR over NETCONF (added to the inventory by the playbook).
+- name: List the VSR's link ports
+  ansible.builtin.command:
+    cmd: "{{ ansible_playbook_python }} {{ role_path }}/files/vsr_ports.py {{ lab_mgmt.vsr_ip }} {{ vsr_admin_user }}"
+    stdin: "{{ vsr_admin_password }}"
+  register: lab_vsr_port_list
+  until: lab_vsr_port_list.rc == 0
+  retries: 6
+  delay: 10
+  delegate_to: localhost
+  changed_when: false
+
+- name: Check there is one port per link
+  vars:
+    ports: "{{ lab_vsr_port_list.stdout | from_json }}"
+  ansible.builtin.assert:
+    that: ports | length == lab_links | length
+    fail_msg: >-
+      The VSR has {{ ports | length }} link ports ({{ ports | map(attribute='name') | join(', ') }})
+      but lab_links has {{ lab_links | length }} links.
+    quiet: true
+
+- name: Pair each link with its VSR port
+  ansible.builtin.set_fact:
+    lab_vsr_ports: >-
+      {{ dict(lab_links | map(attribute='name') | zip(lab_vsr_port_list.stdout | from_json | map(attribute='name'))) }}
+
+- name: Configure the VSR
+  ansible.netcommon.netconf_config:
+    content: "{{ lookup('ansible.builtin.template', item ~ '.xml.j2') }}"
+  loop: "{{ lab_vsr_parts }}"
+  loop_control:
+    label: "{{ item }}"
+  register: lab_vsr_configured
+  notify: Save the VSR configuration
+
+# Changing fast-path limits or ports restarts the fast path, which is usually running again
+# within about a minute. Sessions and routing can't be judged until it is back.
+- name: Wait for the fast path and link interfaces
+  ansible.builtin.command:
+    cmd: >-
+      {{ ansible_playbook_python }} {{ role_path }}/files/vsr_ready.py {{ lab_mgmt.vsr_ip }} {{ vsr_admin_user }}
+      {{ lab_vsr_ready_timeout }} {{ lab_vsr_ready_settle }} {{ lab_links | map(attribute='name') | join(' ') }}
+    stdin: "{{ vsr_admin_password }}"
+  register: lab_vsr_ready
+  when: lab_vsr_configured.results | selectattr('changed') | list | length > 0
+  delegate_to: localhost
+  changed_when: false
+
+- name: Show how long the VSR took to be ready
+  ansible.builtin.debug:
+    msg: "{{ lab_vsr_ready.stdout | from_json }}"
+  when: lab_vsr_ready is not skipped

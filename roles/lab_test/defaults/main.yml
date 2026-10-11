@@ -1,0 +1,8 @@
+# Where the run's summary and evidence go, on the controller (set by the playbook).
+lab_test_dir: "{{ playbook_dir }}/../results/test"
+# Evidence pcaps: how long to wait for the captured subscribers to renew their leases,
+# and the seconds of traffic to capture.
+lab_test_pcap_renew_seconds: 75
+lab_test_pcap_traffic_seconds: 5
+# The VSR's root password, to copy the pcaps back over SFTP: 6WIND's documented default.
+lab_test_vsr_root_password: 6windos

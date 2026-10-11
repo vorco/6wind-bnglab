@@ -1,0 +1,6 @@
+# Generic access network: a neutral default for areas without a provider.
+name: Generic
+remote_id:
+  - format: "bnglab-{id}"
+    id_start: 1
+circuit_id: "bnglab-olt1 eth 1/{s_tag}/{c_tag}"

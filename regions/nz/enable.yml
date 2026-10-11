@@ -1,0 +1,11 @@
+# Enable (New Zealand). Only Bitstream 2 broadband services (product type B02) carry a
+# remote-id and circuit-id; enterprise products (B3A, B3B, B4) carry neither.
+# Format as seen by an RSP on this provider's network; every value is invented.
+name: Enable
+remote_id:
+  # EN + the retail service provider's 3-character code + product type + a 6-digit service ID.
+  - format: "EN{rsp}B02{id:06d}"
+    id_start: 100001
+# <OLT> xpon <shelf/card/port>:<OLT and ONT position, invented here>, ending .10 when the
+# service is handed over tagged.
+circuit_id: "ENLABOLT101 xpon 0/1/{s_tag}/{c_tag}:1.101.1.10"

@@ -1,0 +1,93 @@
+# Runs on the generator VM: NIC drivers, link port names, and BNG Blaster built from source.
+
+# cloud-init exits 2 when it finished with recoverable warnings, so check the status text.
+- name: Wait for the generator's first boot to finish
+  ansible.builtin.command: cloud-init status --wait
+  register: lab_generator_cloudinit
+  changed_when: false
+  failed_when: lab_generator_cloudinit.stdout is not search('status. done')
+
+- name: Read the running kernel
+  ansible.builtin.command: uname -r
+  register: lab_generator_kernel
+  changed_when: false
+
+- name: Install NIC drivers and firmware, and BNG Blaster's build dependencies
+  ansible.builtin.apt:
+    name:
+      # The cloud image's kernel keeps most physical NIC drivers in modules-extra.
+      - linux-modules-extra-{{ lab_generator_kernel.stdout }}
+      - linux-firmware
+      - build-essential
+      - cmake
+      - git
+      - unzip
+      - libpcap-dev
+      - libcunit1-dev
+      - libncurses-dev
+      - libssl-dev
+      - libjansson-dev
+      - libnuma-dev
+      - ethtool
+      - tcpdump
+      - jq
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+  notify: Load NIC drivers
+
+- name: Load drivers for the link ports
+  ansible.builtin.meta: flush_handlers
+
+- name: Find the link ports
+  ansible.builtin.script: link_ports.sh
+  register: lab_generator_ports
+  changed_when: false
+
+- name: Check there is one port per link
+  ansible.builtin.assert:
+    that: lab_generator_ports.stdout_lines | length == lab_links | length
+    fail_msg: >-
+      The generator has {{ lab_generator_ports.stdout_lines | length }} passthrough ports
+      ({{ lab_generator_ports.stdout_lines | join(', ') }}) but lab_links has {{ lab_links | length }} links.
+    quiet: true
+
+- name: Pair each link with its port
+  ansible.builtin.set_fact:
+    lab_generator_link_ports: "{{ lab_generator_link_ports | default([]) + [{'name': item.0, 'pci': item.1}] }}"
+  loop: "{{ lab_links | map(attribute='name') | zip(lab_generator_ports.stdout_lines) | list }}"
+
+- name: Name each link port after its link
+  ansible.builtin.template:
+    src: port.link.j2
+    dest: /etc/systemd/network/10-bnglab-{{ item.name }}.link
+    mode: "0644"
+  loop: "{{ lab_generator_link_ports }}"
+  loop_control:
+    label: "{{ item.name }} = {{ item.pci }}"
+  become: true
+  notify: Reboot the generator
+
+- name: Install the port preparation service
+  ansible.builtin.template:
+    src: bnglab-ports.service.j2
+    dest: /etc/systemd/system/bnglab-ports.service
+    mode: "0644"
+  become: true
+  notify: Reboot the generator
+
+- name: Enable the port preparation service
+  ansible.builtin.systemd_service:
+    name: bnglab-ports.service
+    enabled: true
+    daemon_reload: true
+  become: true
+
+- name: Build BNG Blaster
+  ansible.builtin.include_tasks: bngblaster.yml
+
+- name: Apply port names
+  ansible.builtin.meta: flush_handlers
+
+- name: Check the generator
+  ansible.builtin.include_tasks: verify.yml

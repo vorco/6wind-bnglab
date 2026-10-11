@@ -1,0 +1,18 @@
+# Builds and starts the VSR and generator VMs. Run after make images.
+- name: Check the lab inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - lab_inventory
+
+- name: Build the lab VMs
+  hosts: pve
+  gather_facts: false
+  pre_tasks:
+    - name: Load the secrets
+      ansible.builtin.include_vars:
+        file: "{{ lab_secrets_file }}"
+      no_log: true
+  roles:
+    - lab_vms

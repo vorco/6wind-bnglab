@@ -1,0 +1,41 @@
+# Waits for both guests and checks the VSR licence activated.
+- name: Wait for the VSR's NETCONF port and the generator's SSH port
+  ansible.builtin.wait_for:
+    host: "{{ item.host }}"
+    port: "{{ item.port }}"
+    timeout: "{{ lab_vms_boot_timeout }}"
+    delay: 5
+  loop:
+    - {host: "{{ lab_mgmt.vsr_ip }}", port: 830}
+    - {host: "{{ lab_mgmt.gen_ip }}", port: 22}
+  delegate_to: localhost
+
+- name: Wait for the generator's first boot to finish
+  ansible.builtin.command: >-
+    ssh {{ lab_vms_ssh_opts }} lab@{{ lab_mgmt.gen_ip }} cloud-init status --wait
+  register: lab_vms_gen_ready
+  changed_when: false
+  failed_when: "lab_vms_gen_ready.stdout is not search('status: done')"
+  delegate_to: localhost
+
+# nc-cli, the VSR admin's login shell, reads commands from stdin.
+- name: Wait for the VSR licence to activate
+  ansible.builtin.command:
+    cmd: ssh {{ lab_vms_ssh_opts }} {{ vsr_admin_user }}@{{ lab_mgmt.vsr_ip }}
+    stdin: show license
+  register: lab_vms_license
+  until: lab_vms_license.stdout is search('Active', ignorecase=true) and lab_vms_license.stdout is not search('Inactive', ignorecase=true)
+  retries: 30
+  delay: 10
+  changed_when: false
+  failed_when: false
+  delegate_to: localhost
+
+- name: Check the VSR licence is active
+  ansible.builtin.assert:
+    that: lab_vms_license.stdout is search('Active', ignorecase=true) and lab_vms_license.stdout is not search('Inactive', ignorecase=true)
+    fail_msg: >-
+      The VSR is up but its licence did not activate. It activates online over the management
+      network, so check DNS and internet access from {{ lab_mgmt.vsr_ip }}. 'show license' said:
+      {{ lab_vms_license.stdout_lines | default([]) | select | list | last | default('nothing') }}
+    success_msg: "VSR {{ lab_vms_vsr_image }} is up with an active licence; the generator is ready."

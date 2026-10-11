@@ -1,0 +1,15 @@
+# Prepares the Proxmox host. Run make preflight first: this play assumes the host passed it.
+- name: Check the lab inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    lab_check_secrets: false
+  roles:
+    - lab_inventory
+
+- name: Prepare the Proxmox host
+  hosts: pve
+  gather_facts: false
+  roles:
+    - pve_host

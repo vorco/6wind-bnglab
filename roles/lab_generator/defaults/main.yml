@@ -1,0 +1,12 @@
+# BNG Blaster, built from source. The default is a pinned commit on rtbrick's dev branch
+# (2026-10-03) that includes the DHCP END-option fix (#402) and the LAG member RX fix (#403).
+# Set a branch name such as dev to follow it, or a release tag.
+lab_generator_bngblaster_repo: https://github.com/rtbrick/bngblaster.git
+lab_generator_bngblaster_ref: cc3e0f9c9c54eed3663150434211242c4b037ec3
+# libdict, BNG Blaster's one non-distribution dependency, from rtbrick's release packages.
+lab_generator_libdict_url: https://github.com/rtbrick/libdict/releases/download/1.0.6/libdict-ubuntu-24.04.zip
+lab_generator_libdict_sha256: e3d1d6b991db5154e7fd1cb3f5ccf51342f2f96271597b6957576a89ca917ec0
+# MTU on the generator's link ports (enough for QinQ, MPLS and jumbo test frames).
+lab_generator_port_mtu: 9216
+# Where BNG Blaster is built.
+lab_generator_src: /opt/bngblaster

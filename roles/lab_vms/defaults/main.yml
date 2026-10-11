@@ -1,0 +1,24 @@
+# VSR: 1 control-plane core plus fast-path cores (budget about 1 fast-path core per 5 Gbps).
+lab_vms_vsr_cores: 3
+# Memory for each VM, all backed by 1 GB hugepages: pve_host_hugepages_1g must cover both.
+lab_vms_vsr_memory_gb: 16
+lab_vms_vsr_disk_gb: 32
+# Generator: BNG Blaster's packet rings need the memory.
+lab_vms_gen_cores: 6
+lab_vms_gen_memory_gb: 12
+lab_vms_gen_disk_gb: 32
+# Host cores kept free for Proxmox before automatic pinning starts.
+lab_vms_host_cores: 2
+# Explicit host CPU lists (for example "2-4"); empty means automatic pinning.
+lab_vms_vsr_affinity: ""
+lab_vms_gen_affinity: ""
+# Storage for VM disks and cloud-init drives; empty picks local-zfs, then local-lvm.
+lab_vms_storage: ""
+# Rebuild existing guests: vsr, gen or all. Destroys only guests named bnglab-* with the bnglab tag.
+lab_vms_rebuild: ""
+# Seconds to wait for the guests to come up after starting.
+lab_vms_boot_timeout: 600
+# SSH options used from the workstation to reach the guests.
+lab_vms_ssh_opts: >-
+  -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR
+  {{ ('-i ' ~ ansible_ssh_private_key_file) if ansible_ssh_private_key_file is defined else '' }}

@@ -1,0 +1,7 @@
+# The 6WIND-limit values the CoA test applies ("cir cbs eir ebs unit", per direction).
+lab_coa_limit_in: "10 10 10 10 mbps"
+lab_coa_limit_out: "20 20 20 20 mbps"
+# Subscriber numbers ({n}) used by the test: one of each type gets a CoA, another of each
+# type is disconnected.
+lab_coa_subscriber: 1
+lab_coa_disconnect_subscriber: 2

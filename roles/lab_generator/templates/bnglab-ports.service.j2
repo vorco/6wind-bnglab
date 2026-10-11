@@ -1,0 +1,20 @@
+# Managed by 6wind-bnglab: prepares the link ports for BNG Blaster, which sends and
+# receives raw frames on them. No addresses, no IPv6 autoconfiguration, no receive
+# offloads that would merge or reshape test frames.
+[Unit]
+Description=Prepare the 6wind-bnglab link ports
+After=systemd-udev-settle.service network-pre.target
+Before=network.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+{% for link in lab_links %}
+ExecStart=/usr/sbin/sysctl -qw net.ipv6.conf.{{ link.name }}.disable_ipv6=1
+ExecStart=/usr/sbin/ip link set dev {{ link.name }} up
+ExecStart=-/usr/sbin/ethtool -K {{ link.name }} gro off lro off
+{% endfor %}
+
+[Install]
+WantedBy=multi-user.target

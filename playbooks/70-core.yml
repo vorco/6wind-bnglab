@@ -1,0 +1,52 @@
+# Configures the VSR as an MPLS L3VPN PE (loopback, LDP, iBGP VPNv4/VPNv6) and proves it:
+# BNG Blaster plays the core, brings every subscriber up, and runs labelled traffic both ways.
+# Run after make access.
+- name: Check the lab inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - lab_inventory
+  tasks:
+    - name: Add the VSR and the generator to this run's inventory
+      ansible.builtin.add_host:
+        name: "{{ item.name }}"
+        groups: ["{{ item.group }}"]
+        ansible_host: "{{ item.ip }}"
+        ansible_user: "{{ item.user }}"
+        ansible_password: "{{ item.password | default(omit) }}"
+        ansible_connection: "{{ item.connection }}"
+        ansible_network_os: "{{ item.network_os | default(omit) }}"
+        ansible_port: "{{ item.port }}"
+        ansible_ssh_private_key_file: "{{ hostvars[groups['pve'][0]].ansible_ssh_private_key_file | default(omit) }}"
+        ansible_ssh_common_args: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        ansible_python_interpreter: /usr/bin/python3
+      loop:
+        - {name: bnglab-vsr, group: lab_vsr, ip: "{{ lab_mgmt.vsr_ip }}", user: "{{ vsr_admin_user }}",
+           password: "{{ vsr_admin_password }}", connection: ansible.netcommon.netconf, network_os: default, port: 830}
+        - {name: bnglab-gen, group: lab_gen, ip: "{{ lab_mgmt.gen_ip }}", user: lab, connection: ssh, port: 22}
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: false
+      no_log: true
+
+- name: Configure the VSR core side
+  hosts: lab_vsr
+  gather_facts: false
+  pre_tasks:
+    - name: Load the secrets
+      ansible.builtin.include_vars:
+        file: "{{ lab_secrets_file }}"
+      no_log: true
+  roles:
+    - role: lab_vsr
+      vars:
+        lab_vsr_parts: [core]
+
+- name: Bring the subscribers up and run traffic through the core
+  hosts: lab_gen
+  gather_facts: false
+  roles:
+    - role: lab_sessions
+      vars:
+        lab_sessions_core: true

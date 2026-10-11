@@ -1,0 +1,117 @@
+# The performance check (make perf). Brings every subscriber up (lab_perf_pppoe and
+# lab_perf_ipoe of each, default lab_subscribers' counts), runs lab_perf_bps of traffic for
+# lab_perf_seconds, and reports the fast-path cores' load and how RSS spread the traffic over
+# each port's RX queues in results/perf-<time>/perf.md. Run once the lab is built.
+- name: Check the lab inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - lab_inventory
+  tasks:
+    - name: Create this run's results directory
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/../results/perf-{{ lab_test_stamp }}"
+        state: directory
+        mode: "0755"
+      vars:
+        lab_test_stamp: "{{ now(utc=true, fmt='%Y%m%d-%H%M%S') }}"
+      register: lab_test_dir_created
+
+    - name: Remember the results directory and the subscriber counts
+      ansible.builtin.set_fact:
+        lab_perf_dir: "{{ lab_test_dir_created.path }}"
+        lab_perf_stamp: "{{ lab_test_dir_created.path | basename | replace('perf-', '') }}"
+        lab_perf_subscribers: >-
+          {{ lab_subscribers | combine({'broadband_pppoe': {'count': lab_perf_pppoe | default(lab_subscribers.broadband_pppoe.count) | int},
+                                        'broadband_dhcp': {'count': lab_perf_ipoe | default(lab_subscribers.broadband_dhcp.count) | int}},
+                                       recursive=True) }}
+
+    - name: Add the VSR and the generator to this run's inventory
+      ansible.builtin.add_host:
+        name: "{{ item.name }}"
+        groups: ["{{ item.group }}"]
+        ansible_host: "{{ item.ip }}"
+        ansible_user: "{{ item.user }}"
+        ansible_password: "{{ item.password | default(omit) }}"
+        ansible_connection: "{{ item.connection }}"
+        ansible_network_os: "{{ item.network_os | default(omit) }}"
+        ansible_port: "{{ item.port }}"
+        ansible_ssh_private_key_file: "{{ hostvars[groups['pve'][0]].ansible_ssh_private_key_file | default(omit) }}"
+        ansible_ssh_common_args: -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+        ansible_python_interpreter: /usr/bin/python3
+      loop:
+        - {name: bnglab-vsr, group: lab_vsr, ip: "{{ lab_mgmt.vsr_ip }}", user: "{{ vsr_admin_user }}",
+           password: "{{ vsr_admin_password }}", connection: ansible.netcommon.netconf, network_os: default, port: 830}
+        - {name: bnglab-gen, group: lab_gen, ip: "{{ lab_mgmt.gen_ip }}", user: lab, connection: ssh, port: 22}
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: false
+      no_log: true
+
+- name: Refresh RADIUS
+  hosts: pve
+  gather_facts: false
+  vars:
+    lab_subscribers: "{{ hostvars['localhost'].lab_perf_subscribers }}"
+  pre_tasks:
+    - name: Load the secrets
+      ansible.builtin.include_vars:
+        file: "{{ lab_secrets_file }}"
+      no_log: true
+  roles:
+    - lab_radius
+
+- name: Configure the VSR
+  hosts: lab_vsr
+  gather_facts: false
+  vars:
+    lab_subscribers: "{{ hostvars['localhost'].lab_perf_subscribers }}"
+  pre_tasks:
+    - name: Load the secrets
+      ansible.builtin.include_vars:
+        file: "{{ lab_secrets_file }}"
+      no_log: true
+  roles:
+    - role: lab_vsr
+      vars:
+        lab_vsr_parts: [fast_path, interfaces, ppp_server, ipoe_server, core, enterprise]
+
+# Every regular stream runs at the same rate: the total spread over all of them.
+- name: Bring every subscriber up and measure the fast path under load
+  hosts: lab_gen
+  gather_facts: false
+  vars:
+    lab_subscribers: "{{ hostvars['localhost'].lab_perf_subscribers }}"
+    plan: >-
+      {{ lab_subscribers | bnglab_subscribers(lab_access_areas, lab_links | selectattr('role', 'eq', 'access') | list,
+                                              lab_rsp_code | default('RSP'), lab_bng) }}
+    vrfs: "{{ lab_bng.subscriber_vrfs | map(attribute='name') | list }}"
+    enterprise: "{{ lab_enterprise | default([]) | bnglab_enterprise_plan(lab_links, lab_access_areas, vrfs) }}"
+    # Untagged handoffs on a 0x88a8 link aren't emulated (see docs/enterprise.md).
+    emulated: "{{ enterprise | length - enterprise | rejectattr('c_tag') | selectattr('tpid', 'eq', '0x88a8') | list | length }}"
+    lab_perf_flows: >-
+      {{ (plan | selectattr('type', 'eq', 'pppoe') | list | length) * 4
+         + (plan | selectattr('type', 'eq', 'ipoe') | list | length) * 6
+         + (plan | selectattr('framed_route') | list | length) * 2
+         + (emulated | int) * 4 }}
+  pre_tasks:
+    - name: Load the secrets
+      ansible.builtin.include_vars:
+        file: "{{ lab_secrets_file }}"
+      no_log: true
+  roles:
+    - role: lab_sessions
+      vars:
+        lab_sessions_core: true
+        lab_sessions_enterprise: true
+        lab_sessions_hold: true
+        lab_sessions_traffic_seconds: 0
+        lab_sessions_length: "{{ lab_perf_packet_bytes | default(1000) }}"
+        lab_sessions_pps: >-
+          {{ (lab_perf_bps | default(1000000000) | float)
+             / (8 * (lab_perf_packet_bytes | default(1000) | float) * (lab_perf_flows | float)) }}
+    - role: lab_perf
+      vars:
+        lab_perf_dir: "{{ hostvars['localhost'].lab_perf_dir }}"
+        lab_perf_stamp: "{{ hostvars['localhost'].lab_perf_stamp }}"

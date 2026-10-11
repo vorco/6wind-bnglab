@@ -1,0 +1,7 @@
+# Managed by 6wind-bnglab: names the generator's end of the {{ item.name }} link.
+[Match]
+Path=pci-{{ item.pci }}
+
+[Link]
+Name={{ item.name }}
+MTUBytes={{ lab_generator_port_mtu }}

@@ -1,0 +1,91 @@
+# Removes the lab from the Proxmox host (make teardown). Without CONFIRM=yes it only lists
+# what it would remove. It removes the lab guests (bnglab-vsr, bnglab-gen and bnglab-radius,
+# each tagged bnglab) with their disks, their cloud-init snippets, the RADIUS staging files
+# and the CoA helper; with IMAGES=yes also the staged VSR and generator images and the
+# FreeRADIUS image. The host preparation (repositories, hugepages, vfio) and results/ are left alone.
+- name: Check the lab inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    lab_check_secrets: false
+  roles:
+    - lab_inventory
+
+- name: Remove the lab from the Proxmox host
+  hosts: pve
+  gather_facts: false
+  vars:
+    confirmed: "{{ lab_teardown_confirm | default('') == 'yes' }}"
+    with_images: "{{ lab_teardown_images | default('') == 'yes' }}"
+    storage: "{{ pve_host_dir_storage | default('local') }}"
+  tasks:
+    - name: Read the defaults that name the lab's files
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../roles/{{ item }}/defaults/main.yml"
+      loop: [images, lab_radius]
+
+    - name: Read the lab guests and the storage directories
+      ansible.builtin.shell: |
+        pvesh get /cluster/resources --type vm --output-format json
+        dirname "$(pvesm path {{ storage }}:snippets/probe.yml)"
+        dirname "$(pvesm path {{ storage }}:import/probe.qcow2)"
+        dirname "$(pvesm path {{ storage }}:vztmpl/probe.tar)"
+      register: lab_teardown_host
+      changed_when: false
+
+    - name: Work out what to remove
+      vars:
+        lines: "{{ lab_teardown_host.stdout_lines }}"
+        vsr_image_name: "{{ vsr_image | default('') | basename }}"
+        gen_image_name: "{{ images_gen_url | basename | regex_replace('\\.img$', '.qcow2') }}"
+        oci_template: "{{ lab_radius_image | regex_replace('^.*/', '') | replace(':', '_') }}.tar"
+      ansible.builtin.set_fact:
+        lab_teardown_guests: >-
+          {{ lines[0] | from_json | selectattr('tags', 'defined') | selectattr('tags', 'search', '(^|;)bnglab(;|$)')
+             | selectattr('name', 'defined') | selectattr('name', 'in', ['bnglab-vsr', 'bnglab-gen', 'bnglab-radius']) | list }}
+        lab_teardown_files: >-
+          {{ [lines[1] ~ '/bnglab-vsr-user-data.yml', lines[1] ~ '/bnglab-gen-user-data.yml',
+              lab_radius_stage, '/usr/local/sbin/bnglab-coa']
+             + ([lines[2] ~ '/' ~ vsr_image_name] if with_images and vsr_image_name else [])
+             + ([lines[2] ~ '/' ~ gen_image_name, lines[3] ~ '/' ~ oci_template] if with_images else []) }}
+
+    - name: Show what would be removed
+      vars:
+        guests: "{{ lab_teardown_guests | map(attribute='name') | list }}"
+        vmids: "{{ lab_teardown_guests | map(attribute='vmid') | list }}"
+      ansible.builtin.debug:
+        msg:
+          - "Guests: {{ guests | zip(vmids) | map('join', ' ') | join(', ') or 'none' }}"
+          - "Files: {{ lab_teardown_files | join(', ') }}"
+          - "{{ 'Removing them now.' if confirmed else 'Nothing removed: run make teardown CONFIRM=yes to remove them.' }}"
+
+    - name: Stop and destroy the lab guests, with their disks
+      ansible.builtin.shell: |
+        set -e
+        {% if item.type == 'qemu' %}
+        qm stop {{ item.vmid }} --skiplock 1 || true
+        qm destroy {{ item.vmid }} --purge 1 --destroy-unreferenced-disks 1
+        {% else %}
+        pct stop {{ item.vmid }} || true
+        pct destroy {{ item.vmid }} --purge 1 --destroy-unreferenced-disks 1
+        {% endif %}
+      loop: "{{ lab_teardown_guests }}"
+      loop_control:
+        label: "{{ item.name }} ({{ item.vmid }})"
+      changed_when: true
+      when: confirmed
+
+    - name: Remove the lab's files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ lab_teardown_files }}"
+      when: confirmed
+
+    - name: Remind about the licence
+      ansible.builtin.debug:
+        msg: >-
+          The VSR's licence activation is still counted against your licence. Deactivate it in
+          6WIND's licensing portal before you build the lab again, if you're short of activations.
+      when: confirmed and lab_teardown_guests | selectattr('name', 'eq', 'bnglab-vsr') | list | length > 0

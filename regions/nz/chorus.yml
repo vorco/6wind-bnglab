@@ -1,0 +1,10 @@
+# Chorus (New Zealand). The access network inserts the remote-id, an immutable line
+# identifier, and an informative circuit-id (where the line attaches to the OLT).
+# Format as seen by an RSP on this provider's network; every value is invented.
+name: Chorus
+remote_id:
+  # CHORUS + a 10-digit line ID + B01.
+  - format: "CHORUS{id:010d}B01"
+    id_start: 1000000001
+# <site>-POLT<nn> eth <rack>/<shelf>/<slot>/<port>/<ont>/1/1:<VLAN on the ONT>
+circuit_id: "LAB-POLT01 eth 1/1/{s_tag:02d}/{c_tag:02d}/1/1/1:10"

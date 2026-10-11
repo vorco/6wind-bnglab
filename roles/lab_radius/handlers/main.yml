@@ -1,0 +1,3 @@
+- name: Restart FreeRADIUS
+  ansible.builtin.command: pct reboot {{ lab_radius_vmid }}
+  changed_when: true

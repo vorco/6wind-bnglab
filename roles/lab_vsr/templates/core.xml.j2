@@ -1,0 +1,117 @@
+{# The VSR as an MPLS L3VPN PE: loopback, core link, LDP, and iBGP VPNv4/VPNv6 to the core
+   (BNG Blaster), with OSPF carrying the loopbacks. Each subscriber L3VRF exports its routes with
+   its own static labels and imports the core's routes for it (a default route). IPv6 runs as 6VPE over the
+   IPv4 core: the next hop is the core's IPv4-mapped loopback, resolved over IPv4. #}
+{% set core = lab_links | selectattr('role', 'eq', 'core') | first %}
+{% set c = lab_core %}
+{% set vsr_link_ip = c.link | ansible.utils.ipaddr('0') | ansible.utils.ipaddr('address') %}
+{% set prefix = c.link | ansible.utils.ipaddr('prefix') %}
+<config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <config xmlns="urn:6wind:vrouter">
+    {# Session and interface routes are exported to the core, but never the L3VRF's own
+       "unreachable" default route, which would otherwise win over the core's default. #}
+    <routing xmlns="urn:6wind:vrouter/routing">
+      <ipv4-prefix-list>
+        <name>bnglab-no-default</name>
+        <seq><num>10</num><address>0.0.0.0/0</address><policy>deny</policy></seq>
+        <seq><num>20</num><address>0.0.0.0/0</address><le>32</le><policy>permit</policy></seq>
+      </ipv4-prefix-list>
+      <ipv6-prefix-list>
+        <name>bnglab-no-default</name>
+        <seq><num>10</num><address>::/0</address><policy>deny</policy></seq>
+        <seq><num>20</num><address>::/0</address><le>128</le><policy>permit</policy></seq>
+      </ipv6-prefix-list>
+      <route-map>
+        <name>bnglab-subscribers-v4</name>
+        <seq><num>10</num><policy>permit</policy>
+          <match><ip><address><prefix-list>bnglab-no-default</prefix-list></address></ip></match></seq>
+      </route-map>
+      <route-map>
+        <name>bnglab-subscribers-v6</name>
+        <seq><num>10</num><policy>permit</policy>
+          <match><ipv6><address><prefix-list>bnglab-no-default</prefix-list></address></ipv6></match></seq>
+      </route-map>
+    </routing>
+    <vrf>
+      <name>main</name>
+      <interface xmlns="urn:6wind:vrouter/interface">
+        <loopback xmlns="urn:6wind:vrouter/loopback">
+          <name>lo-core</name>
+          <description>PE loopback (BGP and LDP)</description>
+          <ipv4><address><ip>{{ c.vsr_loopback }}/32</ip></address></ipv4>
+        </loopback>
+        <physical>
+          <name>{{ core.name }}</name>
+          <ipv4><address><ip>{{ vsr_link_ip }}/{{ prefix }}</ip></address></ipv4>
+          {# 6VPE: IPv4-mapped IPv6 lets the VSR resolve IPv6 VPN routes over the IPv4 core. #}
+          <ipv6><address><ip>::ffff:{{ vsr_link_ip }}/{{ 96 + prefix | int }}</ip></address></ipv6>
+        </physical>
+      </interface>
+      <routing xmlns="urn:6wind:vrouter/routing">
+        {# OSPF carries the loopbacks across the core, as on a typical production network; LDP and BGP use them. #}
+        <ospf xmlns="urn:6wind:vrouter/ospf">
+          <router-id>{{ c.vsr_loopback }}</router-id>
+          <network><prefix>{{ c.vsr_loopback }}/32</prefix><area>0</area></network>
+          <network><prefix>{{ c.link }}</prefix><area>0</area></network>
+        </ospf>
+        <mpls>
+          <ldp xmlns="urn:6wind:vrouter/ldp">
+            <router-id>{{ c.vsr_loopback }}</router-id>
+            <address-family>
+              <ipv4>
+                <discovery><transport-address>{{ c.vsr_loopback }}</transport-address></discovery>
+                <interface><name>{{ core.name }}</name></interface>
+              </ipv4>
+            </address-family>
+          </ldp>
+        </mpls>
+        <bgp xmlns="urn:6wind:vrouter/bgp">
+          <as>{{ c.as }}</as>
+          <router-id>{{ c.vsr_loopback }}</router-id>
+          <neighbor>
+            <neighbor-address>{{ c.gen_loopback }}</neighbor-address>
+            <remote-as>{{ c.as }}</remote-as>
+            <update-source>lo-core</update-source>
+            <address-family>
+              <ipv4-unicast><enabled>false</enabled></ipv4-unicast>
+              <ipv4-vpn><enabled>true</enabled></ipv4-vpn>
+              <ipv6-vpn><enabled>true</enabled></ipv6-vpn>
+            </address-family>
+          </neighbor>
+        </bgp>
+      </routing>
+{% for v in c.vrfs %}
+      <l3vrf>
+        <name>{{ v.name }}</name>
+        <routing xmlns="urn:6wind:vrouter/routing">
+          <bgp xmlns="urn:6wind:vrouter/bgp">
+            <as>{{ c.as }}</as>
+            <router-id>{{ c.vsr_loopback }}</router-id>
+            <address-family>
+{%   for af, label, rmap in [('ipv4-unicast', v.vsr_label_ipv4, 'bnglab-subscribers-v4'),
+                                ('ipv6-unicast', v.vsr_label_ipv6, 'bnglab-subscribers-v6')] %}
+              <{{ af }}>
+                <redistribute><protocol>connected</protocol><route-map>{{ rmap }}</route-map></redistribute>
+                <redistribute><protocol>kernel</protocol><route-map>{{ rmap }}</route-map></redistribute>
+                <l3vpn>
+                  <export>
+                    <vpn>true</vpn>
+                    <label>{{ label }}</label>
+                    <route-distinguisher>{{ v.vsr_route_distinguisher }}</route-distinguisher>
+                    <route-target>{{ v.route_target }}</route-target>
+                  </export>
+                  <import>
+                    <vpn>true</vpn>
+                    <route-target>{{ v.route_target }}</route-target>
+                  </import>
+                </l3vpn>
+              </{{ af }}>
+{%   endfor %}
+            </address-family>
+          </bgp>
+        </routing>
+      </l3vrf>
+{% endfor %}
+    </vrf>
+  </config>
+</config>

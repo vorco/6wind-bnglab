@@ -1,0 +1,56 @@
+# Preflight: {{ inventory_hostname }}
+
+Run: {{ preflight_dir | basename }}
+
+## Host
+
+| Check | Result |
+|---|---|
+| Proxmox VE | {{ preflight_report.host.pve_version or 'not found' }} |
+| CPU | {{ preflight_report.host.cpu_vendor }}, {{ preflight_report.host.cpu_count }} threads |
+| Virtualisation (VT-x / AMD-V) | {{ 'yes' if preflight_report.host.cpu_virt else 'NO' }} |
+| 1 GB pages (pdpe1gb) | {{ 'yes' if preflight_report.host.cpu_1g_pages else 'NO' }} |
+| IOMMU groups | {{ preflight_report.host.iommu_groups }} |
+| Boot | {{ 'UEFI' if preflight_report.host.efi else 'legacy BIOS' }} |
+
+## Link ports
+
+| Link | End | PCI | Driver | Interface | IOMMU group | Host use |
+|---|---|---|---|---|---|---|
+{% for link in lab_links %}
+{%   for end in ['bng', 'gen'] %}
+{%     set dev = preflight_report.devices | selectattr('pci', 'eq', link[end ~ '_pci']) | first %}
+| {{ link.name }} | {{ end }} | {{ dev.pci }} | {{ dev.driver | default('missing') }} | {{ dev.netdevs | default([]) | join(', ') }} | {{ dev.iommu_group | default('') }} | {{ dev.used_by_host | default([]) | join('; ') or 'none' }} |
+{%   endfor %}
+{% endfor %}
+
+## Cable loops
+
+| Link | Interfaces | Result |
+|---|---|---|
+{% for link in preflight_loop_links %}
+{%   set run = preflight_loops.results | default([]) | selectattr('item.name', 'defined') | selectattr('item.name', 'eq', link.name) | first | default({}) %}
+{%   if not link.testable %}
+| {{ link.name }} | {{ link.bng_if or '-' }} <-> {{ link.gen_if or '-' }} | skipped: {{ link.skip_reason }} |
+{%   elif run.skipped | default(false) or run.rc is not defined %}
+| {{ link.name }} | {{ link.bng_if }} <-> {{ link.gen_if }} | not run: host problems found first |
+{%   else %}
+| {{ link.name }} | {{ link.bng_if }} <-> {{ link.gen_if }} | {{ 'pass' if run.rc == 0 else 'FAIL' }} ({{ run.stdout_lines | join(' ') }}) |
+{%   endif %}
+{% endfor %}
+
+## Problems
+
+{% for p in preflight_report.problems %}
+- {{ p }}
+{% else %}
+None.
+{% endfor %}
+
+## Warnings
+
+{% for w in preflight_report.warnings %}
+- {{ w }}
+{% else %}
+None.
+{% endfor %}

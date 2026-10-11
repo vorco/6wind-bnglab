@@ -1,0 +1,18 @@
+# Builds the FreeRADIUS application container and loads the lab subscribers. Run after make vms.
+- name: Check the lab inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  roles:
+    - lab_inventory
+
+- name: Build the RADIUS container
+  hosts: pve
+  gather_facts: false
+  pre_tasks:
+    - name: Load the secrets
+      ansible.builtin.include_vars:
+        file: "{{ lab_secrets_file }}"
+      no_log: true
+  roles:
+    - lab_radius

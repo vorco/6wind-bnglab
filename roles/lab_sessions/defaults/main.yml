@@ -1,0 +1,22 @@
+# How fast BNG Blaster brings subscribers up and down, per second.
+lab_sessions_start_rate: 50
+lab_sessions_stop_rate: 50
+# Seconds to wait for every session to come up.
+lab_sessions_timeout: 300
+# Working directory for BNG Blaster on the generator.
+lab_sessions_dir: /var/lib/bnglab
+# Add the core (LDP, iBGP VPN routes, labelled subscriber streams) and a traffic phase.
+lab_sessions_core: false
+# Also run traffic for the enterprise customers (lab_enterprise); needs the core.
+lab_sessions_enterprise: false
+# Leave BNG Blaster running with every session up for later checks (CoA); stop it with
+# session_test.py --stop.
+lab_sessions_hold: false
+# make test mode: add its rate-limit and accounting streams (named test-*; started only by its
+# checks), and leave judging the sessions and traffic to it rather than failing here.
+lab_sessions_test: false
+# Traffic phase: seconds of traffic, and packets per second per stream per direction.
+lab_sessions_traffic_seconds: 30
+lab_sessions_pps: 10
+# IP packet length of the regular streams (0: BNG Blaster's default).
+lab_sessions_length: 0

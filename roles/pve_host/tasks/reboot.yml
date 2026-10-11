@@ -1,0 +1,40 @@
+- name: Read the running kernel arguments and hugepages
+  ansible.builtin.shell: cat /proc/cmdline; cat /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages 2>/dev/null || echo 0
+  register: pve_host_running
+  changed_when: false
+
+- name: Work out whether a reboot is needed
+  ansible.builtin.set_fact:
+    pve_host_reboot_needed: >-
+      {{ pve_host_kernel_args | reject('in', pve_host_running.stdout_lines[0].split()) | list | length > 0
+         or pve_host_running.stdout_lines[1] | int != pve_host_hugepages_1g | int }}
+
+- name: Stop when a reboot is needed but not allowed
+  ansible.builtin.fail:
+    msg: >-
+      The host needs a reboot for the new kernel arguments to take effect.
+      Run again with ALLOW_REBOOT=true (make host ALLOW_REBOOT=true) when the host can go down.
+  when: pve_host_reboot_needed | bool and not pve_host_allow_reboot | bool
+
+- name: Refresh the boot loader before rebooting
+  ansible.builtin.command: "{{ 'proxmox-boot-tool refresh' if pve_host_boot_tool else 'update-grub' }}"
+  when: pve_host_reboot_needed | bool
+  changed_when: true
+
+- name: Reboot the host
+  ansible.builtin.reboot:
+    reboot_timeout: 1200
+  when: pve_host_reboot_needed | bool
+
+- name: Read the hugepages after boot
+  ansible.builtin.command: cat /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages
+  register: pve_host_hugepages
+  changed_when: false
+
+- name: Check the hugepages were reserved
+  ansible.builtin.assert:
+    that: pve_host_hugepages.stdout | int == pve_host_hugepages_1g | int
+    fail_msg: >-
+      Only {{ pve_host_hugepages.stdout }} of {{ pve_host_hugepages_1g }} 1 GB hugepages were reserved at boot.
+      Lower pve_host_hugepages_1g or free memory on the host.
+    quiet: true

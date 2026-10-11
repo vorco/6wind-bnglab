@@ -1,0 +1,7 @@
+- name: Save the VSR configuration
+  ansible.netcommon.netconf_rpc:
+    rpc: copy-config
+    xmlns: urn:ietf:params:xml:ns:netconf:base:1.0
+    content: |
+      <target><startup/></target>
+      <source><running/></source>

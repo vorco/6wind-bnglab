@@ -1,0 +1,33 @@
+# Core: the VSR is a PE in an MPLS L3VPN. BNG Blaster plays the provider core (an iBGP
+# route reflector and LDP neighbour) on the core link. Lab-internal addressing.
+lab_core:
+  as: 64512
+  vsr_loopback: 100.127.255.1
+  gen_loopback: 100.127.255.2
+  # Core link: the VSR takes the first address of the /31, the generator the second.
+  link: 100.127.0.0/31
+  # Core link MTU on both ends (BNG Blaster's network interfaces go up to 9000; OSPF needs them equal).
+  mtu: 9000
+  # One VPN per subscriber L3VRF (lab_bng.subscriber_vrfs). Static VPN labels, above the
+  # VSR's dynamic label ranges. Downstream traffic reaches the VSR with the VSR's label
+  # only (the core pops its LDP label first).
+  vrfs:
+    - name: internet-a
+      route_target: "64512:100"
+      vsr_route_distinguisher: "64512:1"
+      gen_route_distinguisher: "64512:2"
+      vsr_label_ipv4: 26100
+      vsr_label_ipv6: 26101
+      gen_label_ipv4: 26200
+      gen_label_ipv6: 26201
+    - name: internet-b
+      route_target: "64512:101"
+      vsr_route_distinguisher: "64512:11"
+      gen_route_distinguisher: "64512:12"
+      vsr_label_ipv4: 26110
+      vsr_label_ipv6: 26111
+      gen_label_ipv4: 26210
+      gen_label_ipv6: 26211
+  # The "internet" behind the core that subscriber traffic is exchanged with.
+  internet_ipv4: 198.51.100.1
+  internet_ipv6: 2001:db8:ffff::1

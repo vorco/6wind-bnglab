@@ -1,0 +1,338 @@
+# Runs on the generator while lab_sessions holds every subscriber up (lab_sessions_hold) after
+# its traffic phase. Gathers what BNG Blaster, the VSR (over NETCONF, from the controller) and
+# RADIUS (in its container, through the Proxmox host) report, judges each check with the
+# bnglab_check_* filters, and writes the run's summary. BNG Blaster is always stopped.
+- name: Run the checks
+  vars:
+    pve: "{{ groups['pve'][0] }}"
+    plan: >-
+      {{ lab_subscribers | bnglab_subscribers(lab_access_areas, lab_links | selectattr('role', 'eq', 'access') | list,
+                                              lab_rsp_code | default('RSP'), lab_bng) }}
+    rated: "{{ plan | selectattr('rate_limit_mbps') | list }}"
+    rated_pppoe: "{{ (rated | selectattr('type', 'eq', 'pppoe') | first).username }}"
+    rated_ipoe: "{{ (rated | selectattr('type', 'eq', 'ipoe') | first).username }}"
+    accounted: "{{ plan | selectattr('n', 'eq', lab_test.accounting.n | int) | list }}"
+    accounted_pppoe: "{{ (accounted | selectattr('type', 'eq', 'pppoe') | first).username }}"
+    accounted_ipoe: "{{ (accounted | selectattr('type', 'eq', 'ipoe') | first).username }}"
+    limit: "{{ lab_subscribers.rate_limited.mbps | int }}"
+    coa_limit: "{{ lab_subscribers.rate_limited.coa_mbps | int }}"
+    vsr_query: >-
+      {{ ansible_playbook_python }} {{ role_path }}/../lab_coa/files/vsr_query.py {{ lab_mgmt.vsr_ip }} {{ vsr_admin_user }}
+    blaster: "{{ role_path }}/../lab_sessions/files/session_test.py"
+    expected: "{{ lab_subscribers.broadband_pppoe.count | int + lab_subscribers.broadband_dhcp.count | int }}"
+    vsr_pppoe: "{{ lab_test_vsr.results[0].stdout | from_json }}"
+    vsr_ipoe: "{{ lab_test_vsr.results[1].stdout | from_json }}"
+  block:
+    - name: Read BNG Blaster's sessions
+      ansible.builtin.script:
+        cmd: "{{ blaster }} --sessions {{ lab_sessions_dir }}"
+        executable: python3
+      register: lab_test_bb
+      become: true
+      changed_when: false
+
+    - name: Read the VSR's sessions
+      ansible.builtin.command:
+        cmd: "{{ vsr_query }} sessions {{ item }}"
+        stdin: "{{ vsr_admin_password }}"
+      loop: [pppoe, ipoe]
+      register: lab_test_vsr
+      until: lab_test_vsr.rc == 0
+      retries: 3
+      delay: 10
+      delegate_to: localhost
+      changed_when: false
+
+    - name: Read each subscriber L3VRF's routes
+      ansible.builtin.command:
+        cmd: "{{ vsr_query }} routes {{ item.1 }} {{ item.0 }}"
+        stdin: "{{ vsr_admin_password }}"
+      loop: "{{ lab_bng.subscriber_vrfs | map(attribute='name') | product(['ipv4', 'ipv6']) | list }}"
+      loop_control:
+        label: "{{ item.0 }} {{ item.1 }}"
+      register: lab_test_routes
+      until: lab_test_routes.rc == 0
+      retries: 3
+      delay: 10
+      delegate_to: localhost
+      changed_when: false
+
+    - name: Judge the sessions, identifiers, addressing, L3VRFs and traffic
+      vars:
+        sessions: "{{ lab_test_bb.stdout | from_json }}"
+        routes: "{{ lab_test_routes.results | bnglab_route_tables }}"
+      ansible.builtin.set_fact:
+        lab_test_results:
+          - "{{ plan | bnglab_check_sessions(lab_sessions_summary, vsr_pppoe, vsr_ipoe) }}"
+          - "{{ plan | bnglab_check_identifiers(vsr_ipoe) }}"
+          - "{{ plan | bnglab_check_radius_addressing(sessions, lab_sessions_summary.traffic) }}"
+          - "{{ plan | bnglab_check_pool_addressing(sessions, lab_bng) }}"
+          - "{{ plan | bnglab_check_vrfs(sessions, vsr_pppoe, vsr_ipoe, routes) }}"
+          - "{{ lab_sessions_summary | bnglab_check_traffic }}"
+
+    # Tests 7 to 10 each run in their own block: when one fails, the failure is recorded
+    # and the next tests still run.
+    - name: Test 7, login rate limit
+      block:
+        # Rate limits: a subscriber's limit covers its IPv4 and IPv6 traffic together (one PPPoE
+        # session; an IPoE subscriber's aggregated sessions), so its load is split across them.
+        - name: Run traffic over and under the login rate limit
+          ansible.builtin.script:
+            cmd: "{{ blaster }} --streams {{ lab_sessions_dir }} test-rate-{{ item }}- {{ lab_test.rate_seconds }}"
+            executable: python3
+          loop: [over, under]
+          register: lab_test_rate
+          become: true
+          changed_when: false
+
+        - name: Judge the login rate limit
+          vars:
+            runs: >-
+              {{ (lab_test_rate.results[0].stdout | bnglab_rate_runs('over', limit, (limit | int) * 1.2, lab_test.rate_seconds))
+                 + (lab_test_rate.results[1].stdout | bnglab_rate_runs('under', limit, (limit | int) * 0.8, lab_test.rate_seconds)) }}
+            rate: "{{ 7 | bnglab_check_rate('Rate limit at login', runs, lab_test.rate_tolerance) }}"
+            table: "{{ 7 | bnglab_check_limits('Rate limit at login', vsr_pppoe + vsr_ipoe, [rated_pppoe, rated_ipoe], limit) }}"
+          ansible.builtin.set_fact:
+            lab_test_results: "{{ lab_test_results + [[table, rate] | bnglab_merge_results(7, 'Rate limit at login')] }}"
+      rescue:
+        - name: Record that test 7 could not finish
+          ansible.builtin.set_fact:
+            lab_test_results: >-
+              {{ lab_test_results + [{'id': 7, 'name': 'Rate limit at login', 'passed': false,
+                 'detail': (ansible_failed_task.name | default('a task')) ~ ': '
+                           ~ (ansible_failed_result.msg | default('failed') | string)[:300]}] }}
+
+    - name: Test 8, CoA
+      block:
+        - name: Change the rate limit by CoA, once for PPPoE and once per IPoE session
+          ansible.builtin.command:
+            argv: >-
+              {{ ['bnglab-coa', 'coa', item.server, 'User-Name = "' ~ item.user ~ '"']
+                 + (['Acct-Session-Id = "' ~ item.acct ~ '"'] if item.acct else [])
+                 + ['6WIND-limit = "in=' ~ coa_limit ~ ' ' ~ lab_subscribers.rate_limited.burst ~ ' 0 0 mbps"',
+                    '6WIND-limit = "out=' ~ coa_limit ~ ' ' ~ lab_subscribers.rate_limited.burst ~ ' 0 0 mbps"'] }}
+          loop: >-
+            {{ [{'server': 'pppoe', 'user': rated_pppoe, 'acct': ''}]
+               + vsr_ipoe | selectattr('username', 'eq', rated_ipoe) | map(attribute='accounting-session-id')
+                 | map('community.general.dict_kv', 'acct') | map('combine', {'server': 'ipoe', 'user': rated_ipoe}) | list }}
+          loop_control:
+            label: "{{ item.server }} {{ item.user }} {{ item.acct }}"
+          register: lab_test_coa
+          failed_when: "'Received CoA-ACK' not in lab_test_coa.stdout"
+          changed_when: true
+          delegate_to: "{{ pve }}"
+
+        - name: Read the VSR's sessions after the CoA
+          ansible.builtin.command:
+            cmd: "{{ vsr_query }} sessions {{ item }}"
+            stdin: "{{ vsr_admin_password }}"
+          loop: [pppoe, ipoe]
+          register: lab_test_vsr_coa
+          until: lab_test_vsr_coa.rc == 0
+          retries: 3
+          delay: 10
+          delegate_to: localhost
+          changed_when: false
+
+        - name: Run traffic over the new rate limit
+          ansible.builtin.script:
+            cmd: "{{ blaster }} --streams {{ lab_sessions_dir }} test-rate-coa- {{ lab_test.rate_seconds }}"
+            executable: python3
+          register: lab_test_rate_coa
+          become: true
+          changed_when: false
+
+        - name: Judge the CoA
+          vars:
+            runs: >-
+              {{ lab_test_rate_coa.stdout | bnglab_rate_runs('', coa_limit, (coa_limit | int) * 1.1, lab_test.rate_seconds) }}
+            sessions: "{{ (lab_test_vsr_coa.results[0].stdout | from_json) + (lab_test_vsr_coa.results[1].stdout | from_json) }}"
+            rate: "{{ 8 | bnglab_check_rate('CoA', runs, lab_test.rate_tolerance) }}"
+            table: "{{ 8 | bnglab_check_limits('CoA', sessions, [rated_pppoe, rated_ipoe], coa_limit) }}"
+          ansible.builtin.set_fact:
+            lab_test_results: >-
+              {{ lab_test_results + [[table, rate] | bnglab_merge_results(8, 'CoA',
+                                                     'CoA-ACK for all ' ~ lab_test_coa.results | length ~ ' requests')] }}
+      rescue:
+        - name: Record that test 8 could not finish
+          ansible.builtin.set_fact:
+            lab_test_results: >-
+              {{ lab_test_results + [{'id': 8, 'name': 'CoA', 'passed': false,
+                 'detail': (ansible_failed_task.name | default('a task')) ~ ': '
+                           ~ (ansible_failed_result.msg | default('failed') | string)[:300]}] }}
+
+    - name: Test 9, Disconnect
+      block:
+        - name: Run a known transfer for the accounting subscribers
+          ansible.builtin.script:
+            cmd: "{{ blaster }} --streams {{ lab_sessions_dir }} test-volume- {{ lab_test.accounting.seconds }}"
+            executable: python3
+          register: lab_test_volume
+          become: true
+          changed_when: false
+
+        # Disconnecting the accounting subscribers also ends their sessions, so the VSR sends the
+        # Accounting-Request Stop records the accounting check reads.
+        - name: Disconnect the accounting subscribers, once for PPPoE and once per IPoE session
+          ansible.builtin.command:
+            argv: >-
+              {{ ['bnglab-coa', 'disconnect', item.server, 'User-Name = "' ~ item.user ~ '"']
+                 + (['Acct-Session-Id = "' ~ item.acct ~ '"'] if item.acct else []) }}
+          loop: >-
+            {{ [{'server': 'pppoe', 'user': accounted_pppoe, 'acct': ''}]
+               + vsr_ipoe | selectattr('username', 'eq', accounted_ipoe) | map(attribute='accounting-session-id')
+                 | map('community.general.dict_kv', 'acct') | map('combine', {'server': 'ipoe', 'user': accounted_ipoe}) | list }}
+          loop_control:
+            label: "{{ item.server }} {{ item.user }} {{ item.acct }}"
+          register: lab_test_dm
+          failed_when: "'Received Disconnect-ACK' not in lab_test_dm.stdout"
+          changed_when: true
+          delegate_to: "{{ pve }}"
+
+        - name: Wait for the disconnected subscribers' sessions to leave the VSR
+          vars:
+            targeted: >-
+              {{ (vsr_pppoe | selectattr('username', 'eq', accounted_pppoe) | list
+                  + vsr_ipoe | selectattr('username', 'eq', accounted_ipoe) | list) | map(attribute='accounting-session-id') | list }}
+          ansible.builtin.command:
+            cmd: "{{ vsr_query }} sessions {{ item }}"
+            stdin: "{{ vsr_admin_password }}"
+          loop: [pppoe, ipoe]
+          register: lab_test_vsr_dm
+          until: >-
+            lab_test_vsr_dm.rc == 0 and
+            lab_test_vsr_dm.stdout | from_json | map(attribute='accounting-session-id') | intersect(targeted) | length == 0
+          retries: 6
+          delay: 5
+          delegate_to: localhost
+          changed_when: false
+          failed_when: false
+
+        - name: Read BNG Blaster's session counters
+          ansible.builtin.command:
+            cmd: bngblaster-cli {{ lab_sessions_dir }}/access.sock session-counters
+          register: lab_test_counters
+          become: true
+          changed_when: false
+
+        - name: Judge the Disconnect
+          vars:
+            after: "{{ lab_test_vsr_dm.results | map(attribute='stdout', default='[]') | map('from_json') | flatten }}"
+            established: "{{ (lab_test_counters.stdout | from_json)['session-counters']['sessions-established'] }}"
+          ansible.builtin.set_fact:
+            lab_test_results: >-
+              {{ lab_test_results + [9 | bnglab_check_disconnect(vsr_pppoe + vsr_ipoe, after, [accounted_pppoe, accounted_ipoe],
+                                                                 established, expected, lab_test_dm.results | length)] }}
+      rescue:
+        - name: Record that test 9 could not finish
+          ansible.builtin.set_fact:
+            lab_test_results: >-
+              {{ lab_test_results + [{'id': 9, 'name': 'Disconnect', 'passed': false,
+                 'detail': (ansible_failed_task.name | default('a task')) ~ ': '
+                           ~ (ansible_failed_result.msg | default('failed') | string)[:300]}] }}
+
+    - name: Test 10, accounting
+      block:
+        - name: Read the VSR's accounting records
+          ansible.builtin.shell:
+            cmd: >-
+              set -o pipefail;
+              pct exec "$(pct list | awk '$NF == "bnglab-radius" {print $1}')" --
+              sh -c 'cat /var/log/freeradius/radacct/{{ lab_mgmt.vsr_ip }}/detail-*'
+            executable: /bin/bash
+          register: lab_test_detail
+          until: >-
+            lab_test_detail.rc == 0 and
+            (lab_test_detail.stdout | bnglab_session_stops).keys() | list
+            | intersect(lab_acct_sessions.keys() | list) | length == lab_acct_sessions | length
+          retries: 6
+          delay: 5
+          vars:
+            lab_acct_sessions: "{{ vsr_pppoe | bnglab_accounting_sessions(vsr_ipoe, accounted_pppoe, accounted_ipoe) }}"
+          delegate_to: "{{ pve }}"
+          changed_when: false
+          failed_when: false
+
+        - name: Judge the accounting
+          vars:
+            acct_sessions: "{{ vsr_pppoe | bnglab_accounting_sessions(vsr_ipoe, accounted_pppoe, accounted_ipoe) }}"
+          ansible.builtin.set_fact:
+            lab_test_results: >-
+              {{ lab_test_results + [10 | bnglab_check_accounting(lab_test_detail.stdout | default(''), acct_sessions,
+                                                                  lab_test_volume.stdout | from_json, lab_test.accounting_tolerance)] }}
+      rescue:
+        - name: Record that test 10 could not finish
+          ansible.builtin.set_fact:
+            lab_test_results: >-
+              {{ lab_test_results + [{'id': 10, 'name': 'Accounting', 'passed': false,
+                 'detail': (ansible_failed_task.name | default('a task')) ~ ': '
+                           ~ (ansible_failed_result.msg | default('failed') | string)[:300]}] }}
+
+  rescue:
+    - name: Record that the run stopped early
+      ansible.builtin.set_fact:
+        lab_test_results: >-
+          {{ lab_test_results | default([]) + [{'id': 0, 'name': 'Run stopped early', 'passed': false,
+             'detail': (ansible_failed_task.name | default('a task')) ~ ': '
+                       ~ (ansible_failed_result.msg | default('failed') | string)[:300]}] }}
+  always:
+    - name: Stop BNG Blaster
+      ansible.builtin.script:
+        cmd: "{{ role_path }}/../lab_sessions/files/session_test.py --stop {{ lab_sessions_dir }}"
+        executable: python3
+      become: true
+      changed_when: false
+      failed_when: false
+
+- name: Capture the evidence pcaps
+  ansible.builtin.include_tasks: pcaps.yml
+
+- name: Read the versions under test
+  ansible.builtin.command:
+    cmd: "{{ ansible_playbook_python }} {{ role_path }}/../lab_coa/files/vsr_query.py {{ lab_mgmt.vsr_ip }} {{ vsr_admin_user }} version"
+    stdin: "{{ vsr_admin_password }}"
+  register: lab_test_vsr_version
+  until: lab_test_vsr_version.rc == 0
+  retries: 3
+  delay: 10
+  delegate_to: localhost
+  changed_when: false
+  failed_when: false
+
+- name: Read the BNG Blaster version
+  ansible.builtin.command: bngblaster -v
+  register: lab_test_bb_version
+  changed_when: false
+  failed_when: false
+
+- name: Write the summary
+  vars:
+    vsr_version: "{{ lab_test_vsr_version.stdout | default('\"unknown\"') | from_json }}"
+    bb_version: "{{ lab_test_bb_version.stdout_lines | default(['unknown']) | select('search', 'Version') | first | default('unknown') }}"
+  ansible.builtin.template:
+    src: summary.md.j2
+    dest: "{{ lab_test_dir }}/summary.md"
+    mode: "0644"
+  delegate_to: localhost
+
+# Raw data only when something failed, to see why.
+- name: Keep the gathered data for a failed run
+  ansible.builtin.copy:
+    content: >-
+      {{ {'results': lab_test_results, 'sessions': lab_sessions_summary,
+          'bngblaster_sessions': lab_test_bb.stdout | default('[]') | from_json,
+          'vsr_sessions': lab_test_vsr.results | default([]) | map(attribute='stdout', default='[]') | map('from_json') | list,
+          'vsr_routes': lab_test_routes.results | default([]) | map(attribute='stdout', default='[]') | map('from_json') | list,
+          'accounting': lab_test_detail.stdout | default('') | bnglab_parse_detail} | to_nice_json }}
+    dest: "{{ lab_test_dir }}/raw.json"
+    mode: "0644"
+  delegate_to: localhost
+  when: lab_test_results | rejectattr('passed') | list | length > 0
+
+- name: Check every test passed
+  ansible.builtin.assert:
+    that: lab_test_results | rejectattr('passed') | list | length == 0
+    fail_msg: >-
+      {{ lab_test_results | rejectattr('passed') | list | length }} of {{ lab_test_results | length }} tests failed:
+      {{ lab_test_results | rejectattr('passed') | map(attribute='name') | join(', ') }}. See {{ lab_test_dir }}/summary.md.
+    success_msg: "All {{ lab_test_results | length }} tests passed. See {{ lab_test_dir }}/summary.md."

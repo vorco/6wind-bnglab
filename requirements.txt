@@ -1,0 +1,10 @@
+# Runtime: Ansible and the NETCONF stack used to configure the VSR
+ansible-core>=2.17,<2.22
+ncclient>=0.6.15,<0.8
+paramiko>=3,<6           # VSR CLI and capture scripts (lab_test, lab_perf)
+jxmlease>=1.0,<2         # ansible.netcommon NETCONF modules
+xmltodict>=0.13,<2       # ansible.netcommon NETCONF modules
+netaddr>=0.10,<2         # ansible.utils IP address filters
+passlib>=1.7,<2          # VSR admin password hash in the cloud-init seed
+jinja2>=3.1,<4
+pyyaml>=6,<7

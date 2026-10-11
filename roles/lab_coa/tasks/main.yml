@@ -1,0 +1,163 @@
+# Runs on the generator while lab_sessions holds every subscriber up (lab_sessions_hold).
+# Sends CoA and Disconnect requests from the RADIUS container (bnglab-coa on the Proxmox
+# host), checks the result in the VSR's own session table (read over NETCONF from the
+# controller) and in BNG Blaster, and always stops BNG Blaster at the end.
+- name: Test CoA and Disconnect
+  vars:
+    pve: "{{ groups['pve'][0] }}"
+    plan: >-
+      {{ lab_subscribers | bnglab_subscribers(lab_access_areas, lab_links | selectattr('role', 'eq', 'access') | list,
+                                              lab_rsp_code | default('RSP'), lab_bng) }}
+    pppoe_coa: "{{ (plan | selectattr('type', 'eq', 'pppoe') | selectattr('n', 'eq', lab_coa_subscriber | int) | first).username }}"
+    ipoe_coa: "{{ (plan | selectattr('type', 'eq', 'ipoe') | selectattr('n', 'eq', lab_coa_subscriber | int) | first).username }}"
+    pppoe_dm: >-
+      {{ (plan | selectattr('type', 'eq', 'pppoe') | selectattr('n', 'eq', lab_coa_disconnect_subscriber | int) | first).username }}
+    ipoe_dm: >-
+      {{ (plan | selectattr('type', 'eq', 'ipoe') | selectattr('n', 'eq', lab_coa_disconnect_subscriber | int) | first).username }}
+    read_sessions: >-
+      {{ ansible_playbook_python }} {{ role_path }}/files/vsr_query.py {{ lab_mgmt.vsr_ip }} {{ vsr_admin_user }} sessions
+    expected: "{{ lab_subscribers.broadband_pppoe.count | int + lab_subscribers.broadband_dhcp.count | int }}"
+  block:
+    - name: Read the VSR's sessions before the requests
+      ansible.builtin.command:
+        cmd: "{{ read_sessions }} {{ item }}"
+        stdin: "{{ vsr_admin_password }}"
+      loop: [pppoe, ipoe]
+      register: lab_coa_before
+      until: lab_coa_before.rc == 0
+      retries: 3
+      delay: 10
+      delegate_to: localhost
+      changed_when: false
+
+    # A PPPoE session is one logical session for both address families, so one CoA covers it.
+    # An IPoE subscriber has one session per address family, each authenticated separately,
+    # so each session gets its own CoA, addressed by its Acct-Session-Id.
+    - name: Send a rate-limit CoA to a PPPoE subscriber and to each session of an IPoE subscriber
+      ansible.builtin.command:
+        argv: >-
+          {{ ['bnglab-coa', 'coa', item.server, 'User-Name = "' ~ item.user ~ '"']
+             + (['Acct-Session-Id = "' ~ item.acct ~ '"'] if item.acct else [])
+             + ['6WIND-limit = "in=' ~ lab_coa_limit_in ~ '"', '6WIND-limit = "out=' ~ lab_coa_limit_out ~ '"'] }}
+      loop: >-
+        {{ [{'server': 'pppoe', 'user': pppoe_coa, 'acct': ''}]
+           + lab_coa_before.results[1].stdout | from_json | selectattr('username', 'eq', ipoe_coa)
+             | map(attribute='accounting-session-id')
+             | map('community.general.dict_kv', 'acct')
+             | map('combine', {'server': 'ipoe', 'user': ipoe_coa}) | list }}
+      loop_control:
+        label: "{{ item.server }} {{ item.user }} {{ item.acct }}"
+      register: lab_coa_sent
+      failed_when: "'Received CoA-ACK' not in lab_coa_sent.stdout"
+      changed_when: true
+      delegate_to: "{{ pve }}"
+
+    - name: Read the VSR's sessions after the CoA
+      ansible.builtin.command:
+        cmd: "{{ read_sessions }} {{ item }}"
+        stdin: "{{ vsr_admin_password }}"
+      loop: [pppoe, ipoe]
+      register: lab_coa_after_coa
+      until: lab_coa_after_coa.rc == 0
+      retries: 3
+      delay: 10
+      delegate_to: localhost
+      changed_when: false
+
+    - name: Check the VSR applied the rate limits
+      vars:
+        limited: "{{ lab_coa_after_coa.results | map(attribute='stdout') | map('from_json') | flatten
+                     | selectattr('username', 'in', [pppoe_coa, ipoe_coa]) | list }}"
+        expected_sessions: "{{ lab_coa_sent.results | length }}"
+      ansible.builtin.assert:
+        that:
+          - limited | length == expected_sessions | int
+          - limited | map(attribute='rate-limit-in', default='') | unique == [lab_coa_limit_in]
+          - limited | map(attribute='rate-limit-out', default='') | unique == [lab_coa_limit_out]
+        fail_msg: >-
+          The VSR acknowledged the CoAs but its session table shows
+          {{ limited | map(attribute='interface') | zip(limited | map(attribute='rate-limit-in', default='none'),
+             limited | map(attribute='rate-limit-out', default='none')) | list }}
+          instead of in={{ lab_coa_limit_in }}, out={{ lab_coa_limit_out }} on {{ expected_sessions }} sessions.
+        success_msg: >-
+          CoA applied: {{ pppoe_coa }} (1 session) and {{ ipoe_coa }} ({{ expected_sessions | int - 1 }} sessions)
+          are limited to in={{ lab_coa_limit_in }}, out={{ lab_coa_limit_out }}.
+
+    - name: Disconnect a PPPoE subscriber
+      ansible.builtin.command:
+        argv: [bnglab-coa, disconnect, pppoe, 'User-Name = "{{ pppoe_dm }}"']
+      register: lab_coa_dm_pppoe
+      failed_when: "'Received Disconnect-ACK' not in lab_coa_dm_pppoe.stdout"
+      changed_when: true
+      delegate_to: "{{ pve }}"
+
+    # An IPoE subscriber has one session per address family, so each is disconnected on its own.
+    - name: Disconnect each session of an IPoE subscriber
+      ansible.builtin.command:
+        argv:
+          - bnglab-coa
+          - disconnect
+          - ipoe
+          - 'User-Name = "{{ ipoe_dm }}"'
+          - 'Acct-Session-Id = "{{ item["accounting-session-id"] }}"'
+      loop: "{{ lab_coa_before.results[1].stdout | from_json | selectattr('username', 'eq', ipoe_dm) | list }}"
+      loop_control:
+        label: "{{ ipoe_dm }} {{ item.interface }}"
+      register: lab_coa_dm_ipoe
+      failed_when: "'Received Disconnect-ACK' not in lab_coa_dm_ipoe.stdout"
+      changed_when: true
+      delegate_to: "{{ pve }}"
+
+    - name: Wait for the disconnected subscribers to leave the VSR
+      ansible.builtin.command:
+        cmd: "{{ read_sessions }} {{ item.server }}"
+        stdin: "{{ vsr_admin_password }}"
+      loop:
+        - {server: pppoe, user: "{{ pppoe_dm }}"}
+        - {server: ipoe, user: "{{ ipoe_dm }}"}
+      loop_control:
+        label: "{{ item.server }} {{ item.user }}"
+      register: lab_coa_after_dm
+      until: >-
+        lab_coa_after_dm.rc == 0 and
+        lab_coa_after_dm.stdout | from_json | selectattr('username', 'eq', item.user) | list | length == 0
+      retries: 6
+      delay: 5
+      delegate_to: localhost
+      changed_when: false
+
+    - name: Read BNG Blaster's session counters
+      ansible.builtin.command:
+        cmd: bngblaster-cli {{ lab_sessions_dir }}/access.sock session-counters
+      register: lab_coa_counters
+      become: true
+      changed_when: false
+
+    # Only the two disconnected subscribers' sessions are gone from the VSR. BNG Blaster sees
+    # the PPPoE session end (the VSR terminates PPP); a DHCP client isn't told, so the IPoE
+    # Disconnect is checked on the VSR only.
+    - name: Check only the disconnected subscribers went
+      vars:
+        before: "{{ lab_coa_before.results | map(attribute='stdout') | map('from_json') | list }}"
+        after: "{{ lab_coa_after_dm.results | map(attribute='stdout') | map('from_json') | list }}"
+        ipoe_dm_sessions: "{{ before[1] | selectattr('username', 'eq', ipoe_dm) | list | length }}"
+        established: "{{ (lab_coa_counters.stdout | from_json)['session-counters']['sessions-established'] }}"
+      ansible.builtin.assert:
+        that:
+          - after[0] | length == before[0] | length - 1
+          - after[1] | length == before[1] | length - ipoe_dm_sessions | int
+          - established | int == expected | int - 1
+        fail_msg: >-
+          Expected one PPPoE and {{ ipoe_dm_sessions }} IPoE sessions to go. The VSR went from
+          {{ before[0] | length }} to {{ after[0] | length }} PPPoE and {{ before[1] | length }} to
+          {{ after[1] | length }} IPoE sessions; BNG Blaster has {{ established }} of {{ expected }} established.
+        success_msg: >-
+          Disconnect applied: {{ pppoe_dm }} and {{ ipoe_dm }} ({{ ipoe_dm_sessions }} sessions) are gone and every
+          other session is still up ({{ after[0] | length }} PPPoE, {{ after[1] | length }} IPoE sessions on the VSR).
+  always:
+    - name: Stop BNG Blaster
+      ansible.builtin.script:
+        cmd: "{{ role_path }}/../lab_sessions/files/session_test.py --stop {{ lab_sessions_dir }}"
+        executable: python3
+      become: true
+      changed_when: false

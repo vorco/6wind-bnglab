@@ -1,0 +1,19 @@
+{# Every link port runs in the fast path. Changing the port list restarts the fast path. #}
+{% set sessions = lab_subscribers.broadband_pppoe.count | int + lab_subscribers.broadband_dhcp.count | int %}
+<config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <config xmlns="urn:6wind:vrouter">
+    <system xmlns="urn:6wind:vrouter/system">
+      <fast-path xmlns="urn:6wind:vrouter/fast-path">
+        <enabled>true</enabled>
+{% for link in lab_links %}
+        <port>{{ lab_vsr_ports[link.name] }}</port>
+{% endfor %}
+        <limits>
+          <vlan-max-if>{{ [1024, sessions * 2] | max }}</vlan-max-if>
+          <pppoe-max-channel>{{ [1024, sessions * 2] | max }}</pppoe-max-channel>
+          <ipoe-max-session>{{ [1024, sessions * 2] | max }}</ipoe-max-session>
+        </limits>
+      </fast-path>
+    </system>
+  </config>
+</config>

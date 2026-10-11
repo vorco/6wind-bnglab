@@ -1,0 +1,139 @@
+# Builds the VSR and generator VMs with PF passthrough and cloud-init, starts them,
+# and waits for them. Existing lab guests are found by name and the bnglab tag; one
+# built with different settings is only replaced when lab_vms_rebuild names it.
+
+- name: Read the lab guests
+  ansible.builtin.command: pvesh get /cluster/resources --type vm --output-format json
+  register: lab_vms_resources
+  changed_when: false
+
+- name: Read the node name, hugepages and storages
+  ansible.builtin.shell: |
+    hostname
+    cat /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages
+    pvesh get /storage --output-format json
+  register: lab_vms_host
+  changed_when: false
+
+- name: Work out the guests' settings
+  vars:
+    guests: "{{ lab_vms_resources.stdout | from_json | selectattr('tags', 'defined')
+                | selectattr('tags', 'search', '(^|;)bnglab(;|$)') | list }}"
+    storages: "{{ lab_vms_host.stdout_lines[2:] | join('\n') | from_json }}"
+    vm_storages: "{{ storages | selectattr('content', 'search', 'images') | map(attribute='storage') | list }}"
+  ansible.builtin.set_fact:
+    # Bump when the qm create options change, so older lab VMs are reported as different.
+    lab_vms_build_format: 2
+    lab_vms_existing: "{{ guests | items2dict(key_name='name', value_name='vmid') }}"
+    lab_vms_existing_status: "{{ guests | items2dict(key_name='name', value_name='status') }}"
+    lab_vms_node: "{{ lab_vms_host.stdout_lines[0] }}"
+    lab_vms_hugepages: "{{ lab_vms_host.stdout_lines[1] | int }}"
+    lab_vms_disk_storage: >-
+      {{ lab_vms_storage if lab_vms_storage | length > 0
+         else (['local-zfs', 'local-lvm'] | intersect(vm_storages) + vm_storages) | first | default('') }}
+    lab_vms_import_storage: "{{ pve_host_dir_storage | default('local') }}"
+    lab_vms_vsr_pcis: "{{ lab_links | map(attribute='bng_pci') | list }}"
+    lab_vms_gen_pcis: "{{ lab_links | map(attribute='gen_pci') | list }}"
+    lab_vms_vsr_mac: "{{ '02:' ~ ('bnglab-vsr' | hash('md5'))[:10] | regex_replace('(..)(?!$)', '\\1:') }}"
+    lab_vms_gen_mac: "{{ '02:' ~ ('bnglab-gen' | hash('md5'))[:10] | regex_replace('(..)(?!$)', '\\1:') }}"
+    lab_vms_vsr_image: "{{ (vsr_image | default('')) | basename }}"
+
+- name: Find the snippets directory
+  ansible.builtin.command: pvesm path {{ pve_host_dir_storage | default('local') }}:snippets/probe.yml
+  register: lab_vms_snippets_probe
+  changed_when: false
+
+- name: Record the snippets directory
+  ansible.builtin.set_fact:
+    lab_vms_snippets_dir: "{{ lab_vms_snippets_probe.stdout | dirname }}"
+
+- name: Create the snippets directory
+  ansible.builtin.file:
+    path: "{{ lab_vms_snippets_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Check the build can go ahead
+  ansible.builtin.assert:
+    that:
+      - lab_vms_vsr_image is search('\.qcow2$')
+      - lab_vms_disk_storage | length > 0
+      - lab_vms_vsr_cores | int >= 2
+      - lab_vms_hugepages | int >= lab_vms_vsr_memory_gb | int + lab_vms_gen_memory_gb | int
+      - lab_vms_rebuild in ['', 'vsr', 'gen', 'all']
+    fail_msg: >-
+      Can't build the VMs: vsr_image must name the staged VSR .qcow2 (run make images first),
+      a storage with 'images' content must exist, the VSR needs at least 2 cores,
+      the host's {{ lab_vms_hugepages }} x 1 GB hugepages must cover the VSR and generator memory
+      ({{ lab_vms_vsr_memory_gb | int + lab_vms_gen_memory_gb | int }} GB)
+      (set pve_host_hugepages_1g and run make host), and REBUILD must be vsr, gen or all.
+    quiet: true
+
+- name: Plan CPU pinning
+  ansible.builtin.script:
+    cmd: "cpu_plan.py {{ request | to_json | quote }}"
+    executable: python3
+  vars:
+    request:
+      host_cores: "{{ lab_vms_host_cores | int }}"
+      vms:
+        - {name: vsr, cores: "{{ lab_vms_vsr_cores | int }}", pcis: "{{ lab_vms_vsr_pcis }}"}
+        - {name: gen, cores: "{{ lab_vms_gen_cores | int }}", pcis: "{{ lab_vms_gen_pcis }}"}
+  register: lab_vms_cpu_plan
+  changed_when: false
+  when: lab_vms_vsr_affinity | length == 0 or lab_vms_gen_affinity | length == 0
+
+- name: Choose the CPU pinning
+  vars:
+    plan: "{{ (lab_vms_cpu_plan.stdout | default('{\"plan\": {}, \"errors\": []}')) | from_json }}"
+  ansible.builtin.set_fact:
+    lab_vms_cpu_errors: "{{ plan.errors }}"
+    lab_vms_vsr_cpus: "{{ lab_vms_vsr_affinity if lab_vms_vsr_affinity | length > 0 else plan.plan.vsr | default('') }}"
+    lab_vms_gen_cpus: "{{ lab_vms_gen_affinity if lab_vms_gen_affinity | length > 0 else plan.plan.gen | default('') }}"
+
+- name: Check the CPU pinning
+  ansible.builtin.assert:
+    that: lab_vms_vsr_cpus | length > 0 and lab_vms_gen_cpus | length > 0
+    fail_msg: "{{ lab_vms_cpu_errors + ['Lower the core counts or set lab_vms_vsr_affinity / lab_vms_gen_affinity.'] }}"
+    quiet: true
+
+- name: Hash the VSR admin password
+  ansible.builtin.set_fact:
+    lab_vms_vsr_password_hash: >-
+      {{ vsr_admin_password | password_hash('sha256', (vsr_admin_password ~ vsr_admin_user) | hash('sha1') | truncate(16, true, '')) }}
+  no_log: true
+
+- name: Build the VSR VM
+  ansible.builtin.include_tasks: vm.yml
+  vars:
+    lab_vms_vm:
+      key: vsr
+      name: bnglab-vsr
+      cores: "{{ lab_vms_vsr_cores }}"
+      memory_gb: "{{ lab_vms_vsr_memory_gb }}"
+      disk_gb: "{{ lab_vms_vsr_disk_gb }}"
+      cpus: "{{ lab_vms_vsr_cpus }}"
+      image: "{{ lab_vms_vsr_image }}"
+      pcis: "{{ lab_vms_vsr_pcis }}"
+      mac: "{{ lab_vms_vsr_mac }}"
+      ip: "{{ lab_mgmt.vsr_ip }}"
+      user_data: "{{ lookup('ansible.builtin.template', 'vsr-user-data.yml.j2') }}"
+
+- name: Build the generator VM
+  ansible.builtin.include_tasks: vm.yml
+  vars:
+    lab_vms_vm:
+      key: gen
+      name: bnglab-gen
+      cores: "{{ lab_vms_gen_cores }}"
+      memory_gb: "{{ lab_vms_gen_memory_gb }}"
+      disk_gb: "{{ lab_vms_gen_disk_gb }}"
+      cpus: "{{ lab_vms_gen_cpus }}"
+      image: "{{ images_gen_url | default('noble-server-cloudimg-amd64.img') | basename | regex_replace('\\.img$', '.qcow2') }}"
+      pcis: "{{ lab_vms_gen_pcis }}"
+      mac: "{{ lab_vms_gen_mac }}"
+      ip: "{{ lab_mgmt.gen_ip }}"
+      user_data: ""
+
+- name: Wait for the guests
+  ansible.builtin.include_tasks: verify.yml

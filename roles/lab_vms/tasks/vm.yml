@@ -1,0 +1,132 @@
+# Creates one lab VM described by lab_vms_vm, or checks an existing one still matches.
+# The build signature covers everything fixed at creation (image, sizing, ports, network,
+# first-boot configuration, and lab_vms_build_format for changes to how this role builds
+# VMs); CPU pinning is applied in place instead.
+
+- name: Work out the build signature for {{ lab_vms_vm.name }}
+  ansible.builtin.set_fact:
+    lab_vms_exists: "{{ lab_vms_vm.name in lab_vms_existing }}"
+    lab_vms_vmid: "{{ lab_vms_existing[lab_vms_vm.name] | default('') }}"
+    lab_vms_signature: >-
+      {{ [lab_vms_build_format, lab_vms_vm.image, lab_vms_vm.cores, lab_vms_vm.memory_gb, lab_vms_vm.disk_gb, lab_vms_vm.pcis,
+          lab_vms_vm.mac, lab_vms_vm.ip, lab_mgmt, lab_vms_disk_storage, lab_vms_vm.user_data,
+          lab_ssh_public_keys] | to_json | hash('sha1') | truncate(12, true, '') }}
+  no_log: true
+
+- name: Read the existing VM - {{ lab_vms_vm.name }}
+  ansible.builtin.command: pvesh get /nodes/{{ lab_vms_node }}/qemu/{{ lab_vms_vmid }}/config --output-format json
+  register: lab_vms_current
+  changed_when: false
+  when: lab_vms_exists | bool
+
+- name: Compare with the wanted build - {{ lab_vms_vm.name }}
+  vars:
+    description: "{{ (lab_vms_current.stdout | from_json).description | default('') if lab_vms_exists | bool else '' }}"
+  ansible.builtin.set_fact:
+    lab_vms_built_image: "{{ (description | regex_search('image=(\\S+)', '\\1') or ['unknown']) | first }}"
+    lab_vms_matches: "{{ description is search('build=' ~ lab_vms_signature) }}"
+    lab_vms_replace: "{{ lab_vms_rebuild in [lab_vms_vm.key, 'all'] }}"
+
+- name: Stop when built differently - {{ lab_vms_vm.name }}
+  ansible.builtin.fail:
+    msg: >-
+      {{ lab_vms_vm.name }} (VM {{ lab_vms_vmid }}) was built with different settings{{ image_note }}.
+      Run make vms REBUILD={{ lab_vms_vm.key }} to destroy and rebuild it.
+  vars:
+    image_note: >-
+      {{ ' (image ' ~ lab_vms_built_image ~ ', wanted ' ~ lab_vms_vm.image ~ ')'
+         if lab_vms_built_image != lab_vms_vm.image else '' }}
+  when: lab_vms_exists | bool and not lab_vms_matches | bool and not lab_vms_replace | bool
+
+- name: Destroy for the rebuild - {{ lab_vms_vm.name }}
+  ansible.builtin.shell: |
+    set -e
+    qm stop {{ lab_vms_vmid }} || true
+    qm destroy {{ lab_vms_vmid }} --purge 1 --destroy-unreferenced-disks 1
+  when: lab_vms_exists | bool and lab_vms_replace | bool
+  changed_when: true
+
+- name: Create {{ lab_vms_vm.name }}
+  when: not lab_vms_exists | bool or lab_vms_replace | bool
+  block:
+    - name: Allocate a VM ID - {{ lab_vms_vm.name }}
+      ansible.builtin.command: pvesh get /cluster/nextid
+      register: lab_vms_nextid
+      changed_when: false
+
+    - name: Write the cloud-init user data - {{ lab_vms_vm.name }}
+      ansible.builtin.copy:
+        content: "{{ lab_vms_vm.user_data }}"
+        dest: "{{ lab_vms_snippets_dir }}/{{ lab_vms_vm.name }}-user-data.yml"
+        mode: "0600"
+      no_log: true
+      when: lab_vms_vm.user_data | length > 0
+
+    - name: Write the SSH keys - {{ lab_vms_vm.name }}
+      ansible.builtin.copy:
+        content: "{{ lab_ssh_public_keys | join('\n') }}\n"
+        dest: "/root/.bnglab-{{ lab_vms_vm.name }}-keys.pub"
+        mode: "0600"
+      when: lab_vms_vm.user_data | length == 0
+
+    - name: Create the VM {{ lab_vms_vm.name }}
+      ansible.builtin.command: >-
+        qm create {{ lab_vms_nextid.stdout }}
+        --name {{ lab_vms_vm.name }} --tags bnglab
+        --description 'Managed by 6wind-bnglab. image={{ lab_vms_vm.image }} build={{ lab_vms_signature }}'
+        --machine q35 --ostype l26
+        --cpu host,flags=+pdpe1gb
+        --sockets 1 --cores {{ lab_vms_vm.cores }} --numa 1 --affinity {{ lab_vms_vm.cpus }}
+        --memory {{ lab_vms_vm.memory_gb | int * 1024 }} --balloon 0 --hugepages 1024
+        --scsihw virtio-scsi-single
+        --scsi0 {{ lab_vms_disk_storage }}:0,import-from={{ lab_vms_import_storage }}:import/{{ lab_vms_vm.image }},iothread=1
+        --ide2 {{ lab_vms_disk_storage }}:cloudinit
+        --serial0 socket --vga serial0
+        --net0 virtio={{ lab_vms_vm.mac }},bridge={{ lab_mgmt.bridge }}
+        --ipconfig0 ip={{ lab_vms_vm.ip }}/{{ lab_mgmt.prefix }},gw={{ lab_mgmt.gateway }}
+        --nameserver '{{ lab_mgmt.dns | join(' ') }}'
+        {% if lab_vms_vm.user_data | length > 0 %}
+        --cicustom user={{ lab_vms_import_storage }}:snippets/{{ lab_vms_vm.name }}-user-data.yml
+        {% else %}
+        --ciuser lab --sshkeys /root/.bnglab-{{ lab_vms_vm.name }}-keys.pub --ciupgrade 0
+        {% endif %}
+        --boot order=scsi0 --onboot 0 --agent 0
+        {% for pci in lab_vms_vm.pcis %}--hostpci{{ loop.index0 }} {{ pci }},pcie=1 {% endfor %}
+      changed_when: true
+
+    - name: Grow the disk - {{ lab_vms_vm.name }}
+      ansible.builtin.command: qm resize {{ lab_vms_nextid.stdout }} scsi0 {{ lab_vms_vm.disk_gb }}G
+      changed_when: true
+
+    - name: Remove the temporary SSH key file
+      ansible.builtin.file:
+        path: "/root/.bnglab-{{ lab_vms_vm.name }}-keys.pub"
+        state: absent
+
+    - name: Record the new VM ID - {{ lab_vms_vm.name }}
+      ansible.builtin.set_fact:
+        lab_vms_vmid: "{{ lab_vms_nextid.stdout }}"
+
+- name: Read the CPU pinning - {{ lab_vms_vm.name }}
+  ansible.builtin.command: pvesh get /nodes/{{ lab_vms_node }}/qemu/{{ lab_vms_vmid }}/config --output-format json
+  register: lab_vms_config
+  changed_when: false
+
+- name: Pin to its CPUs - {{ lab_vms_vm.name }}
+  ansible.builtin.command: qm set {{ lab_vms_vmid }} --affinity {{ lab_vms_vm.cpus }}
+  when: (lab_vms_config.stdout | from_json).affinity | default('') != lab_vms_vm.cpus
+  changed_when: true
+
+- name: Read the state - {{ lab_vms_vm.name }}
+  ansible.builtin.command: qm status {{ lab_vms_vmid }}
+  register: lab_vms_status
+  changed_when: false
+
+- name: Start the VM - {{ lab_vms_vm.name }}
+  ansible.builtin.command: qm start {{ lab_vms_vmid }}
+  when: lab_vms_status.stdout is not search('running')
+  changed_when: true
+
+- name: Remember the VM ID - {{ lab_vms_vm.name }}
+  ansible.builtin.set_fact:
+    lab_vms_ids: "{{ lab_vms_ids | default({}) | combine({lab_vms_vm.key: lab_vms_vmid}) }}"

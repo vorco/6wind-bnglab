@@ -1,0 +1,33 @@
+- name: Read the BNG Blaster version
+  ansible.builtin.command: bngblaster -v
+  register: lab_generator_version
+  changed_when: false
+
+- name: Read the link ports
+  ansible.builtin.command: ip -j link show dev {{ item.name }}
+  loop: "{{ lab_generator_link_ports }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: lab_generator_links
+  changed_when: false
+
+- name: Check the link ports are named, up and at the right MTU
+  ansible.builtin.assert:
+    that:
+      - (item.stdout | from_json | first).mtu == lab_generator_port_mtu | int
+      - (item.stdout | from_json | first).flags is contains('UP')
+    fail_msg: "{{ item.item.name }} is not up at MTU {{ lab_generator_port_mtu }}: {{ item.stdout }}"
+    quiet: true
+  loop: "{{ lab_generator_links.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+
+- name: Report
+  ansible.builtin.debug:
+    msg: >-
+      Generator ready: BNG Blaster {{ lab_generator_version.stdout | regex_search('Version: (\S+)', '\1') | first }}
+      built from {{ lab_generator_version.stdout | regex_search('SHA: (\S+)', '\1') | first }}.
+      Link ports: {{ lab_generator_links.results | map(attribute='stdout') | map('from_json') | map('first')
+      | map(attribute='ifname') | join(', ') }}
+      ({{ lab_generator_links.results | map(attribute='stdout') | map('from_json') | map('first')
+      | map(attribute='operstate') | join(', ') }}).

@@ -1,0 +1,55 @@
+# Access network. Each area is one S-tag on an access link (a population area on a
+# provider's handover); every subscriber in it has its own C-tag, with PPPoE subscribers
+# on the even C-tags and IPoE subscribers on the odd ones, from C-tag 2.
+#   provider  the region profile (regions/<provider>.yml) that sets the remote-id and
+#             circuit-id the access network inserts (default: generic/default).
+#   link      the access link carrying the area (default: the first access link); the
+#             S-tag's ethertype is that link's tpid.
+lab_access_areas:
+  - name: chorus
+    s_tag: 2
+    provider: nz/chorus
+  - name: enable
+    s_tag: 3
+    provider: nz/enable
+  - name: tuatahi
+    s_tag: 4
+    provider: nz/tuatahi
+  - name: northpower
+    s_tag: 5
+    provider: nz/northpower
+
+# Retail service provider code that some providers put in their identifiers
+# (for example Enable and Tuatahi's legacy form).
+lab_rsp_code: RSP
+
+# BNG addressing. Lab-internal: subscriber pools come from shared address space
+# (100.64.0.0/10) and IPv6 documentation space (2001:db8::/32).
+lab_bng:
+  # L3VRFs the subscriber sessions are placed in (RADIUS returns each subscriber's).
+  # The lab spreads the subscribers across them in turn.
+  subscriber_vrfs:
+    - name: internet-a
+      table_id: 100
+    - name: internet-b
+      table_id: 101
+  # Gateway address the subscribers see (PPP local address, DHCP router).
+  gateway_ipv4: 100.64.0.1
+  # UDP ports the PPP and IPoE servers listen on for CoA and Disconnect requests,
+  # on the VSR's management address.
+  coa_port_pppoe: 3799
+  coa_port_ipoe: 3800
+  pppoe:
+    ipv4_pool: 100.64.0.2-100.64.63.254
+    ipv6_pool: 2001:db8:100::/40    # a /64 per subscriber
+    ipv6_pd: 2001:db8:200::/40      # a /56 per subscriber
+  ipoe:
+    ipv4_pool: 100.64.64.2-100.64.127.254
+    ipv6_pool: 2001:db8:300::/40
+    ipv6_pd: 2001:db8:400::/40
+  # Addressing RADIUS returns to the RADIUS-addressed half of the subscribers; the
+  # other half take their addresses from the pools above.
+  radius:
+    ipv4: 100.64.160.0/24            # Framed-IP-Address, one per subscriber
+    ipv6_pd: "2001:db8:700::/40"     # Delegated-IPv6-Prefix, a /56 each
+    framed_route: 100.64.192.0/24    # Framed-Route, a /29 for one subscriber of each type

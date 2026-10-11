@@ -1,0 +1,12 @@
+#!/bin/sh
+# Managed by 6wind-bnglab. Sends a RADIUS Disconnect-Request or CoA-Request to the VSR's
+# PPP or IPoE server from the bnglab-radius container.
+# Usage: bnglab-coa disconnect|coa pppoe|ipoe 'User-Name = "pppoe1@bnglab.example"' ['Attribute = value' ...]
+set -e
+usage() { echo "usage: $0 disconnect|coa pppoe|ipoe 'Attribute = value' ..." >&2; exit 2; }
+case "$1" in disconnect|coa) type=$1 ;; *) usage ;; esac
+case "$2" in pppoe) port={{ lab_bng.coa_port_pppoe }} ;; ipoe) port={{ lab_bng.coa_port_ipoe }} ;; *) usage ;; esac
+shift 2
+ct=$(pct list | awk '$NF == "bnglab-radius" {print $1}')
+[ -n "$ct" ] || { echo "bnglab-radius container not found" >&2; exit 1; }
+printf '%s\n' "$@" | pct exec "$ct" -- radclient -x -S /etc/freeradius/bnglab/coa-secret {{ lab_mgmt.vsr_ip }}:"$port" "$type"

@@ -1,0 +1,14 @@
+# make test settings.
+lab_test:
+  # The subscriber of each type (by {n}) whose accounting is checked against a known
+  # transfer in both directions (Mbps for seconds), then disconnected.
+  accounting:
+    n: 3
+    mbps: 20
+    seconds: 20
+  # Seconds of traffic at each rate-limit check, and how close (as a fraction) the
+  # received rate must be to the limit.
+  rate_seconds: 10
+  rate_tolerance: 0.1
+  # How close (as a fraction) accounted octets must be to the bytes sent and received.
+  accounting_tolerance: 0.05

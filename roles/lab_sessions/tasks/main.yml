@@ -1,0 +1,64 @@
+# Runs on the generator: brings up every lab subscriber with BNG Blaster, checks each one
+# got IPv4, IPv6 and a delegated prefix, then tears them all down.
+- name: Create the BNG Blaster working directory
+  ansible.builtin.file:
+    path: "{{ lab_sessions_dir }}"
+    state: directory
+    mode: "0755"
+  become: true
+
+- name: Prepare the core updates
+  ansible.builtin.include_tasks: core.yml
+  when: lab_sessions_core | bool
+
+- name: Write the subscriber configuration
+  ansible.builtin.template:
+    src: access.json.j2
+    dest: "{{ lab_sessions_dir }}/access.json"
+    mode: "0644"
+  become: true
+
+- name: Bring every subscriber up and down
+  ansible.builtin.script:
+    cmd: >-
+      session_test.py {{ lab_sessions_dir }}/access.json {{ lab_sessions_dir }}
+      {{ lab_subscribers.broadband_pppoe.count | int + lab_subscribers.broadband_dhcp.count | int }}
+      {{ lab_sessions_timeout }}
+      {{ lab_sessions_traffic_seconds if lab_sessions_core | bool else '' }}
+      {{ '--hold' if lab_sessions_hold | bool else '' }}
+    executable: python3
+  become: true
+  register: lab_sessions_result
+  changed_when: false
+  failed_when: false
+
+- name: Read the result
+  ansible.builtin.set_fact:
+    lab_sessions_summary: "{{ lab_sessions_result.stdout | from_json }}"
+
+- name: Show the result
+  ansible.builtin.debug:
+    var: lab_sessions_summary
+
+# A held run (make test, make perf, make coa) carries on with incomplete sessions: the role
+# that uses them reports what came up instead.
+- name: Check every subscriber came up dual-stack
+  when: not (lab_sessions_test | bool or lab_sessions_hold | bool)
+  ansible.builtin.assert:
+    that: lab_sessions_summary.complete == lab_sessions_summary.expected
+    fail_msg: >-
+      {{ lab_sessions_summary.expected - lab_sessions_summary.complete }} subscribers did not come up
+      dual-stack with a delegated prefix (see the result above).
+    success_msg: >-
+      {{ lab_sessions_summary.complete }} of {{ lab_sessions_summary.expected }} subscribers came up dual-stack
+      {{ 'and are being held for the next checks' if lab_sessions_summary.held else 'and were torn down again' }}.
+      Delegated prefixes: {{ lab_sessions_summary.with_delegated_prefix }}.
+
+- name: Check every flow was verified without loss
+  when: not (lab_sessions_test | bool or lab_sessions_hold | bool)
+  ansible.builtin.assert:
+    that: lab_sessions_result.rc == 0
+    fail_msg: >-
+      Traffic failed: {{ lab_sessions_summary.unverified_flows | length }} or more flows were not verified
+      or lost packets (see unverified_flows above), or BGP/LDP did not come up (see core above).
+    success_msg: "{{ 'Every flow was verified without loss.' if lab_sessions_core | bool else 'No traffic phase.' }}"

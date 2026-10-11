@@ -1,0 +1,74 @@
+# Prepares a fresh Proxmox VE 9 host for the lab: apt repositories, kernel arguments,
+# vfio modules and storage content types. Reboots only when pve_host_allow_reboot is true.
+# Passthrough ports are not bound to vfio-pci here: Proxmox rebinds them when a VM starts.
+
+- name: Read the Proxmox VE version
+  ansible.builtin.command: pveversion
+  register: pve_host_version
+  changed_when: false
+
+- name: Check this is Proxmox VE 9
+  ansible.builtin.assert:
+    that: pve_host_version.stdout is search('^pve-manager/9\.')
+    fail_msg: "Only Proxmox VE 9 is supported; this host runs {{ pve_host_version.stdout }}."
+    quiet: true
+
+- name: Read the Debian codename
+  ansible.builtin.shell: . /etc/os-release && echo "$VERSION_CODENAME"
+  register: pve_host_os
+  changed_when: false
+
+- name: Read the host memory
+  ansible.builtin.shell: awk '/^MemTotal:/ {print int($2 / 1048576)}' /proc/meminfo
+  register: pve_host_mem
+  changed_when: false
+
+- name: Check the hugepages fit in memory
+  ansible.builtin.assert:
+    that: pve_host_hugepages_1g | int + pve_host_reserved_gb | int <= pve_host_mem.stdout | int
+    fail_msg: >-
+      pve_host_hugepages_1g ({{ pve_host_hugepages_1g }}) plus pve_host_reserved_gb ({{ pve_host_reserved_gb }})
+      is more than the host's {{ pve_host_mem.stdout }} GB of RAM.
+    quiet: true
+
+- name: Switch to the no-subscription repository
+  ansible.builtin.include_tasks: repositories.yml
+  when: pve_host_no_subscription_repo | bool
+
+- name: Set the kernel arguments
+  ansible.builtin.include_tasks: kernel.yml
+
+- name: Load the vfio modules at boot
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/bnglab-vfio.conf
+    content: |
+      # Managed by 6wind-bnglab: PCI passthrough
+      vfio
+      vfio_iommu_type1
+      vfio_pci
+    mode: "0644"
+
+- name: Load the vfio modules now
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop: [vfio, vfio_iommu_type1, vfio_pci]
+
+- name: Read the directory storage content types
+  ansible.builtin.command: pvesh get /storage/{{ pve_host_dir_storage }} --output-format json
+  register: pve_host_storage
+  changed_when: false
+
+- name: Allow snippets and imported images on the directory storage
+  vars:
+    current: "{{ (pve_host_storage.stdout | from_json).content.split(',') }}"
+    wanted: "{{ current | union(['snippets', 'import']) }}"
+  ansible.builtin.command: pvesm set {{ pve_host_dir_storage }} --content {{ wanted | join(',') }}
+  when: wanted | length != current | length
+  changed_when: true
+
+- name: Apply the boot loader change
+  ansible.builtin.meta: flush_handlers
+
+- name: Reboot when needed
+  ansible.builtin.include_tasks: reboot.yml

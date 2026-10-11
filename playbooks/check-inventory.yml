@@ -1,0 +1,9 @@
+# Validates inventory/local (or INVENTORY=...) and the secrets file without contacting the host.
+- name: Check the lab inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    lab_secrets_file: "{{ playbook_dir }}/../vars/secrets.yml"
+  roles:
+    - lab_inventory

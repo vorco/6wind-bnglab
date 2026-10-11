@@ -1,0 +1,24 @@
+{# RADIUS settings shared by the PPP and IPoE servers: FreeRADIUS on the management VRF.
+   Each server also listens for CoA and Disconnect requests on the VSR's management address,
+   on its own port (coa_port, set by the including template). #}
+            <enabled>true</enabled>
+            <server>
+              <address>{{ lab_mgmt.radius_ip }}</address>
+              <secret>{{ radius_shared_secret }}</secret>
+              <auth-port>1812</auth-port>
+              <acct-port>1813</acct-port>
+            </server>
+            <vrf>mgmt</vrf>
+            <source-ipv4>{{ lab_mgmt.vsr_ip }}</source-ipv4>
+            <nas>
+              <ipv4-address>{{ lab_mgmt.vsr_ip }}</ipv4-address>
+              <identifier>bnglab-vsr</identifier>
+            </nas>
+            <accounting>
+              <interim-interval>{{ lab_radius_acct_interim | default(300) }}</interim-interval>
+            </accounting>
+            <change-of-authorization-server>
+              <ip-address>{{ lab_mgmt.vsr_ip }}</ip-address>
+              <port>{{ coa_port }}</port>
+              <secret>{{ radius_coa_secret }}</secret>
+            </change-of-authorization-server>

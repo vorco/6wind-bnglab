@@ -1,0 +1,30 @@
+# The core's LDP and BGP RAW update files, replayed by BNG Blaster to the VSR.
+- name: Install scapy for BNG Blaster's LDP update generator
+  ansible.builtin.apt:
+    name: python3-scapy
+  become: true
+
+- name: Generate the LDP update (core loopback and link address, implicit null)
+  vars:
+    gen_link_ip: "{{ lab_core.link | ansible.utils.ipaddr('1') | ansible.utils.ipaddr('address') }}"
+  ansible.builtin.shell: |
+    set -e
+    cd {{ lab_sessions_dir }}
+    ldpupdate -l {{ lab_core.gen_loopback }} -a {{ gen_link_ip }} -A 1 \
+      -p {{ lab_core.gen_loopback }}/32 -P 1 -m 3 -f core.ldp.new
+    ldpupdate -l {{ lab_core.gen_loopback }} -a {{ lab_core.gen_loopback }} -A 1 -f core.ldp.new --append
+    if cmp -s core.ldp.new core.ldp; then rm core.ldp.new; else mv core.ldp.new core.ldp; echo changed; fi
+  register: lab_sessions_ldp
+  changed_when: "'changed' in lab_sessions_ldp.stdout"
+  become: true
+
+- name: Generate the BGP update (VPN default routes with the core's labels)
+  ansible.builtin.script:
+    cmd: >-
+      bgp_vpn_update.py {{ lab_sessions_dir }}/core.bgp {{ lab_core.gen_loopback }}
+      {% for v in lab_core.vrfs %}
+      {{ v.gen_route_distinguisher }} {{ v.route_target }} {{ v.gen_label_ipv4 }} {{ v.gen_label_ipv6 }}
+      {% endfor %}
+    executable: python3
+  changed_when: false
+  become: true

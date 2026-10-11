@@ -1,0 +1,8 @@
+# Northpower Fibre (New Zealand).
+# Format as seen by an RSP on this provider's network; every value is invented.
+name: Northpower
+remote_id:
+  # NPF4 + 9 digits + D.
+  - format: "NPF4{id:09d}D"
+    id_start: 100000001
+circuit_id: "NPF_OLT_LAB01 eth 3/1/{s_tag}/{c_tag}/g1:10"

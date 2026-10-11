@@ -1,0 +1,128 @@
+# Runs on the Proxmox host. Builds bnglab-radius as a Proxmox application container
+# from the official FreeRADIUS OCI image, pushes the lab's configuration into it and
+# restarts it when that configuration changes. FreeRADIUS is the container's only process.
+
+- name: Read the lab guests, storages and node name
+  ansible.builtin.shell: |
+    pvesh get /cluster/resources --type vm --output-format json
+    pvesh get /storage --output-format json
+    hostname
+  register: lab_radius_host
+  changed_when: false
+
+- name: Work out the container settings
+  vars:
+    guests: "{{ lab_radius_host.stdout_lines[0] | from_json | selectattr('tags', 'defined')
+                | selectattr('tags', 'search', '(^|;)bnglab(;|$)') | selectattr('type', 'eq', 'lxc') | list }}"
+    storages: "{{ lab_radius_host.stdout_lines[1] | from_json }}"
+    ct_storages: "{{ storages | selectattr('content', 'search', 'rootdir') | map(attribute='storage') | list }}"
+    match: "{{ guests | selectattr('name', 'eq', 'bnglab-radius') | list }}"
+  ansible.builtin.set_fact:
+    # Bump when the pct create options change, so older containers are reported as different.
+    lab_radius_build_format: 2
+    lab_radius_node: "{{ lab_radius_host.stdout_lines[2] }}"
+    lab_radius_exists: "{{ match | length > 0 }}"
+    lab_radius_vmid: "{{ (match | first).vmid | default('') }}"
+    lab_radius_status: "{{ (match | first).status | default('') }}"
+    lab_radius_rootfs_storage: >-
+      {{ lab_radius_storage if lab_radius_storage | length > 0
+         else (['local-zfs', 'local-lvm'] | intersect(ct_storages) + ct_storages) | first | default('') }}
+    lab_radius_mac: "{{ '02:' ~ ('bnglab-radius' | hash('md5'))[:10] | regex_replace('(..)(?!$)', '\\1:') }}"
+    lab_radius_replace: "{{ lab_radius_rebuild in ['radius', 'all'] }}"
+    # Proxmox names a pulled image <name>_<tag>.tar in the template storage.
+    lab_radius_template_file: "{{ lab_radius_image | regex_replace('^.*/', '') | replace(':', '_') }}.tar"
+    lab_radius_dir_storage: "{{ pve_host_dir_storage | default('local') }}"
+
+- name: List the container templates
+  ansible.builtin.command: pveam list {{ lab_radius_dir_storage }}
+  register: lab_radius_templates
+  changed_when: false
+
+- name: Pull the FreeRADIUS image
+  when: lab_radius_template_file not in lab_radius_templates.stdout
+  block:
+    - name: Start pulling the FreeRADIUS image
+      ansible.builtin.command: >-
+        pvesh create /nodes/{{ lab_radius_node }}/storage/{{ lab_radius_dir_storage }}/oci-registry-pull
+        --reference {{ lab_radius_image }}
+      register: lab_radius_pull
+      changed_when: true
+
+    - name: Wait for the image pull to finish
+      ansible.builtin.command: >-
+        pvesh get /nodes/{{ lab_radius_node }}/tasks/{{ lab_radius_pull.stdout_lines | last }}/status --output-format json
+      register: lab_radius_pull_status
+      until: (lab_radius_pull_status.stdout | from_json).status == 'stopped'
+      retries: 60
+      delay: 5
+      changed_when: false
+      failed_when: >-
+        lab_radius_pull_status.rc != 0 or
+        ((lab_radius_pull_status.stdout | from_json).status == 'stopped'
+         and (lab_radius_pull_status.stdout | from_json).exitstatus != 'OK')
+
+- name: Work out the build signature
+  ansible.builtin.set_fact:
+    lab_radius_signature: >-
+      {{ [lab_radius_build_format, lab_radius_image, lab_radius_cores, lab_radius_memory_mb,
+          lab_radius_disk_gb, lab_radius_rootfs_storage, lab_mgmt] | to_json | hash('sha1') | truncate(12, true, '') }}
+
+- name: Read the existing container
+  ansible.builtin.command: pvesh get /nodes/{{ lab_radius_node }}/lxc/{{ lab_radius_vmid }}/config --output-format json
+  register: lab_radius_current
+  changed_when: false
+  when: lab_radius_exists | bool
+
+- name: Stop when the container was built differently
+  ansible.builtin.fail:
+    msg: >-
+      bnglab-radius (CT {{ lab_radius_vmid }}) was built with different settings.
+      Run make radius REBUILD=radius to destroy and rebuild it.
+  when: >-
+    lab_radius_exists | bool and not lab_radius_replace | bool and
+    (lab_radius_current.stdout | from_json).description | default('') is not search('build=' ~ lab_radius_signature)
+
+- name: Destroy the container for the rebuild
+  ansible.builtin.shell: |
+    set -e
+    pct stop {{ lab_radius_vmid }} || true
+    pct destroy {{ lab_radius_vmid }} --purge 1 --destroy-unreferenced-disks 1
+  when: lab_radius_exists | bool and lab_radius_replace | bool
+  changed_when: true
+
+- name: Create the container
+  when: not lab_radius_exists | bool or lab_radius_replace | bool
+  block:
+    - name: Allocate a container ID
+      ansible.builtin.command: pvesh get /cluster/nextid
+      register: lab_radius_nextid
+      changed_when: false
+
+    - name: Create the container bnglab-radius
+      ansible.builtin.command: >-
+        pct create {{ lab_radius_nextid.stdout }} {{ lab_radius_dir_storage }}:vztmpl/{{ lab_radius_template_file }}
+        --hostname bnglab-radius --tags bnglab
+        --description 'Managed by 6wind-bnglab. build={{ lab_radius_signature }}'
+        --unprivileged 1 --cores {{ lab_radius_cores }} --memory {{ lab_radius_memory_mb }} --swap 0
+        --rootfs {{ lab_radius_rootfs_storage }}:{{ lab_radius_disk_gb }}
+        --net0 {{ net0 }} --onboot 0
+      vars:
+        net0: "{{ ['name=eth0', 'bridge=' ~ lab_mgmt.bridge, 'hwaddr=' ~ lab_radius_mac,
+                   'ip=' ~ lab_mgmt.radius_ip ~ '/' ~ lab_mgmt.prefix, 'gw=' ~ lab_mgmt.gateway] | join(',') }}"
+      changed_when: true
+
+    - name: Record the new container ID
+      ansible.builtin.set_fact:
+        lab_radius_vmid: "{{ lab_radius_nextid.stdout }}"
+        lab_radius_status: stopped
+
+- name: Start the container
+  ansible.builtin.command: pct start {{ lab_radius_vmid }}
+  when: lab_radius_status != 'running'
+  changed_when: true
+
+- name: Configure FreeRADIUS
+  ansible.builtin.include_tasks: configure.yml
+
+- name: Self-test
+  ansible.builtin.include_tasks: selftest.yml

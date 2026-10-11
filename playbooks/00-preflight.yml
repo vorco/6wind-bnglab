@@ -1,0 +1,17 @@
+# Read-only checks before anything changes on the host. The only side effect is
+# the cable loop test, which briefly moves each link's two ports into temporary
+# network namespaces and always puts them back.
+- name: Check the lab inventory
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    lab_check_secrets: false
+  roles:
+    - lab_inventory
+
+- name: Preflight the Proxmox host
+  hosts: pve
+  gather_facts: false
+  roles:
+    - preflight

@@ -1,0 +1,152 @@
+# Evidence pcaps: the VSR captures one PPPoE and one IPoE subscriber (by MAC, on their
+# access LAG) through a fresh run of every subscriber: setup, at least one DHCP renewal (the
+# lab's leases are short), a few seconds of traffic through the core, and the teardown.
+# Each capture is copied from the VSR as root; the IPoE capture is split into its IPv4 and
+# IPv6 parts. Results land in <results>/pcaps/.
+- name: Capture the evidence pcaps
+  vars:
+    plan: >-
+      {{ lab_subscribers | bnglab_subscribers(lab_access_areas, lab_links | selectattr('role', 'eq', 'access') | list,
+                                              lab_rsp_code | default('RSP'), lab_bng) }}
+    pppoe: "{{ plan | bnglab_session_subject('pppoe', 1) }}"
+    ipoe: "{{ plan | bnglab_session_subject('ipoe', 1) }}"
+    lag: "{{ (plan | selectattr('type', 'eq', 'pppoe') | first).link }}-lag"
+    stop_file: "{{ lab_test_dir }}/.stop-captures"
+    pcaps: "{{ lab_test_dir }}/pcaps"
+    blaster: "{{ role_path }}/../lab_sessions/files/session_test.py"
+    expected: "{{ lab_subscribers.broadband_pppoe.count | int + lab_subscribers.broadband_dhcp.count | int }}"
+    # Empty: vsr_capture.py uses the SSH agent and the default keys.
+    key: "{{ lab_ssh_private_key_file | default(hostvars[groups['pve'][0]].ansible_ssh_private_key_file | default('')) }}"
+  block:
+    - name: Prepare the results directory for the pcaps
+      ansible.builtin.file:
+        path: "{{ pcaps }}"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+
+    - name: Clear the capture stop signal
+      ansible.builtin.file:
+        path: "{{ stop_file }}"
+        state: absent
+      delegate_to: localhost
+
+    - name: Start the captures on the VSR
+      ansible.builtin.command:
+        argv:
+          - "{{ ansible_playbook_python }}"
+          - "{{ role_path }}/files/vsr_capture.py"
+          - "{{ lab_mgmt.vsr_ip }}"
+          - "{{ vsr_admin_user }}"
+          - "{{ key }}"
+          - "bnglab-{{ item.name }}.pcap"
+          - "{{ lag }}"
+          - "ether host {{ item.mac }}"
+          - "{{ stop_file }}"
+          - "{{ pcaps }}/{{ item.name }}.pcap"
+      environment:
+        VSR_ROOT_PASSWORD: "{{ lab_test_vsr_root_password }}"
+      loop:
+        - {name: pppoe-dualstack, mac: "{{ pppoe.mac }}"}
+        - {name: ipoe, mac: "{{ ipoe.mac }}"}
+      loop_control:
+        label: "{{ item.name }} {{ item.mac }}"
+      async: 960
+      poll: 0
+      register: lab_test_captures
+      delegate_to: localhost
+      changed_when: false
+
+    - name: Wait for the captures to start
+      ansible.builtin.wait_for:
+        path: "{{ pcaps }}/{{ item }}.pcap.started"
+        timeout: 300
+      loop: [pppoe-dualstack, ipoe]
+      delegate_to: localhost
+
+    - name: Bring every subscriber up again
+      ansible.builtin.script:
+        cmd: >-
+          {{ blaster }} {{ lab_sessions_dir }}/access.json {{ lab_sessions_dir }} {{ expected }}
+          {{ lab_sessions_timeout }} --hold
+        executable: python3
+      register: lab_test_pcap_sessions
+      become: true
+      changed_when: false
+      failed_when: false
+
+    - name: Wait for the subscribers to renew their leases
+      ansible.builtin.pause:
+        seconds: "{{ lab_test_pcap_renew_seconds }}"
+
+    - name: Run a few seconds of the captured subscribers' traffic
+      ansible.builtin.script:
+        cmd: >-
+          {{ blaster }} --session-streams {{ lab_sessions_dir }} {{ lab_test_pcap_traffic_seconds }}
+          {{ pppoe.session_id }} {{ ipoe.session_id }}
+        executable: python3
+      become: true
+      changed_when: false
+      failed_when: false
+  # A capture that fails to start doesn't stop the run: the pcap check below reports what is
+  # missing as test 11, and the summary is still written.
+  rescue:
+    - name: Note why the captures did not complete
+      ansible.builtin.debug:
+        msg: "{{ ansible_failed_task.name | default('a task') }}: {{ ansible_failed_result.msg | default('failed') }}"
+  always:
+    - name: Tear the subscribers down
+      ansible.builtin.script:
+        cmd: "{{ role_path }}/../lab_sessions/files/session_test.py --stop {{ lab_sessions_dir }}"
+        executable: python3
+      become: true
+      changed_when: false
+      failed_when: false
+
+    - name: Let the teardown reach the captures, then stop them
+      ansible.builtin.copy:
+        content: ""
+        dest: "{{ lab_test_dir }}/.stop-captures"
+        mode: "0644"
+      delegate_to: localhost
+
+    - name: Wait for the captures to stop and copy back
+      ansible.builtin.async_status:
+        jid: "{{ item.ansible_job_id }}"
+      loop: "{{ lab_test_captures.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.name | default('capture') }}"
+      register: lab_test_capture_done
+      until: lab_test_capture_done.finished
+      retries: 30
+      delay: 5
+      delegate_to: localhost
+      failed_when: false
+
+- name: Read the pcaps (splitting the IPoE one into IPv4 and IPv6)
+  ansible.builtin.command:
+    argv: >-
+      {{ [ansible_playbook_python, role_path ~ '/files/pcap_check.py', lab_test_dir ~ '/pcaps/' ~ item ~ '.pcap']
+         + ([lab_test_dir ~ '/pcaps/ipoe-dhcpv4.pcap', lab_test_dir ~ '/pcaps/ipoe-dhcpv6.pcap'] if item == 'ipoe' else []) }}
+  loop: [pppoe-dualstack, ipoe, ipoe-dhcpv4, ipoe-dhcpv6]
+  register: lab_test_pcap_counts
+  delegate_to: localhost
+  changed_when: false
+  failed_when: false
+  when: (lab_test_dir ~ '/pcaps/' ~ item ~ '.pcap') is file
+
+- name: Remove the combined IPoE pcap (now split by IP version) and the capture markers
+  ansible.builtin.file:
+    path: "{{ lab_test_dir }}/{{ item }}"
+    state: absent
+  loop: [pcaps/ipoe.pcap, pcaps/ipoe.pcap.started, pcaps/pppoe-dualstack.pcap.started, .stop-captures]
+  delegate_to: localhost
+
+- name: Judge the pcaps
+  vars:
+    counts: >-
+      {{ dict(lab_test_pcap_counts.results | rejectattr('skipped', 'defined') | selectattr('rc', 'eq', 0)
+              | map(attribute='item') | zip(lab_test_pcap_counts.results | rejectattr('skipped', 'defined')
+              | selectattr('rc', 'eq', 0) | map(attribute='stdout') | map('from_json'))) }}
+  ansible.builtin.set_fact:
+    lab_test_results: "{{ lab_test_results | default([]) + [11 | bnglab_check_pcaps(counts)] }}"

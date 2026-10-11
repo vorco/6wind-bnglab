@@ -1,0 +1,11 @@
+# Replace the enterprise apt repositories with pve-no-subscription when the host has no subscription.
+pve_host_no_subscription_repo: true
+# 1 GB hugepages reserved at boot. Both lab VMs take all their memory from these
+# (VSR 16 GB + generator 12 GB by default); checked when the VMs are built.
+pve_host_hugepages_1g: 28
+# RAM left outside the hugepages for the host, ZFS and the RADIUS container, in GB.
+pve_host_reserved_gb: 16
+# Directory storage that holds cloud-init snippets and imported disk images.
+pve_host_dir_storage: local
+# The host reboots only when this is true (make host ALLOW_REBOOT=true).
+pve_host_allow_reboot: false

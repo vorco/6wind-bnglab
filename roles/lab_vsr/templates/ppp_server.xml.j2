@@ -1,0 +1,57 @@
+{# PPPoE on every access LAG. Sessions arrive QinQ-tagged (S-tag per area, C-tag per subscriber)
+   and any tags are accepted. RADIUS places them in the subscriber L3VRF. #}
+{% set access = lab_links | selectattr('role', 'eq', 'access') | list %}
+{% set sessions = lab_subscribers.broadband_pppoe.count | int %}
+<config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <config xmlns="urn:6wind:vrouter">
+    <vrf>
+      <name>main</name>
+      <ppp-server xmlns="urn:6wind:vrouter/ppp-server" xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" nc:operation="replace">
+        <instance>
+          <name>bnglab</name>
+          <enabled>true</enabled>
+          <max-sessions>{{ [sessions * 2, 1024] | max }}</max-sessions>
+          <ppp>
+            <mtu>1492</mtu>
+            <mru>1492</mru>
+            <ipcp>require</ipcp>
+            <ipv6cp>allow</ipv6cp>
+            <lcp><echo-interval>30</echo-interval><echo-failure>3</echo-failure></lcp>
+          </ppp>
+          <pppoe>
+            <enabled>true</enabled>
+{% for link in access %}
+            <interface><name>{{ link.name }}-lag</name></interface>
+{% endfor %}
+            <ac-name>bnglab-vsr</ac-name>
+            <ip-pool>subs-v4</ip-pool>
+            <ipv6-pool>subs-v6</ipv6-pool>
+            <ipv6-prefix-delegation>subs-pd</ipv6-prefix-delegation>
+          </pppoe>
+          <auth>
+            <enabled>true</enabled>
+            <peer-auth-mode>pap</peer-auth-mode>
+            <radius>
+              {# The PPP local address for sessions whose address comes from RADIUS (Framed-IP-Address). #}
+              <default-local-ip>{{ lab_bng.gateway_ipv4 }}</default-local-ip>
+{% set coa_port = lab_bng.coa_port_pppoe %}
+{% include '_radius.xml.j2' %}
+            </radius>
+          </auth>
+          <ip-pool>
+            <default-local-ip>{{ lab_bng.gateway_ipv4 }}</default-local-ip>
+            <pool><name>subs-v4</name><peer-pool>{{ lab_bng.pppoe.ipv4_pool }}</peer-pool></pool>
+          </ip-pool>
+          <ipv6-pool>
+            <pool><name>subs-v6</name><prefix>{{ lab_bng.pppoe.ipv6_pool }}</prefix><prefix-len>64</prefix-len></pool>
+            <prefix-delegation><name>subs-pd</name><prefix>{{ lab_bng.pppoe.ipv6_pd }}</prefix><prefix-len>56</prefix-len></prefix-delegation>
+          </ipv6-pool>
+          <ipv6-neighbor-discovery>
+            <enabled>true</enabled>
+            <dhcpv6><enabled>true</enabled><pref-lifetime>{{ lab_vsr_dhcpv6_preferred }}</pref-lifetime><valid-lifetime>{{ lab_vsr_dhcpv6_valid }}</valid-lifetime></dhcpv6>
+          </ipv6-neighbor-discovery>
+        </instance>
+      </ppp-server>
+    </vrf>
+  </config>
+</config>

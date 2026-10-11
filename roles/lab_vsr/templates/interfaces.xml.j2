@@ -1,0 +1,48 @@
+{# One physical interface per link, named after it. Access links sit in a single-member
+   LACP LAG named <link>-lag, as with multi-chassis LAG on a typical production BNG. The subscriber
+   L3VRFs have no interfaces of their own: RADIUS places the sessions in them. #}
+<config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <config xmlns="urn:6wind:vrouter">
+    <vrf>
+      <name>main</name>
+      <interface xmlns="urn:6wind:vrouter/interface">
+{% for link in lab_links %}
+        <physical>
+          <name>{{ link.name }}</name>
+          <port>{{ lab_vsr_ports[link.name] }}</port>
+          <mtu>{{ lab_core.mtu | default(lab_vsr_port_mtu) if link.role == 'core' else lab_vsr_port_mtu }}</mtu>
+          <enabled>true</enabled>
+          <description>6wind-bnglab {{ link.role }} link {{ link.name }}</description>
+        </physical>
+{% endfor %}
+        {# The subscriber gateway address lives in the main VRF, as on a typical production BNG. #}
+        <loopback xmlns="urn:6wind:vrouter/loopback">
+          <name>lo-bng</name>
+          <description>Subscriber gateway</description>
+          <ipv4><address><ip>{{ lab_bng.gateway_ipv4 }}/32</ip></address></ipv4>
+        </loopback>
+{% for link in lab_links | selectattr('role', 'eq', 'access') %}
+        <lag xmlns="urn:6wind:vrouter/lag">
+          <name>{{ link.name }}-lag</name>
+          <enabled>true</enabled>
+          <mtu>{{ lab_vsr_port_mtu }}</mtu>
+          <description>6wind-bnglab access LAG for {{ link.name }} (single member, LACP)</description>
+          <mode>lacp</mode>
+          <lacp-rate>fast</lacp-rate>
+          <xmit-hash-policy>layer2+3</xmit-hash-policy>
+          <link-interface><slave>{{ link.name }}</slave></link-interface>
+          {# IPoE subscribers ARP for the gateway address, which lives on the subscriber loopback. #}
+          <network-stack><ipv4><arp-proxy>true</arp-proxy></ipv4></network-stack>
+        </lag>
+{% endfor %}
+      </interface>
+{% for v in lab_bng.subscriber_vrfs %}
+      <l3vrf>
+        <name>{{ v.name }}</name>
+        <table-id>{{ v.table_id }}</table-id>
+        <description>6wind-bnglab subscribers</description>
+      </l3vrf>
+{% endfor %}
+    </vrf>
+  </config>
+</config>

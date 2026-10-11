@@ -1,0 +1,48 @@
+# ZFS-root installs boot through proxmox-boot-tool, which reads /etc/kernel/cmdline.
+# Other installs use GRUB's GRUB_CMDLINE_LINUX_DEFAULT.
+- name: Find out how the host boots
+  ansible.builtin.command: proxmox-boot-tool status
+  register: pve_host_pbt
+  changed_when: false
+  failed_when: false
+
+- name: Record the boot method
+  ansible.builtin.set_fact:
+    pve_host_boot_tool: "{{ pve_host_pbt.rc == 0 and pve_host_pbt.stdout is search('is configured with') }}"
+    pve_host_kernel_args:
+      - iommu=pt
+      - hugepagesz=1G
+      - default_hugepagesz=1G
+      - hugepages={{ pve_host_hugepages_1g }}
+
+- name: Read the current kernel arguments
+  ansible.builtin.slurp:
+    src: "{{ '/etc/kernel/cmdline' if pve_host_boot_tool else '/etc/default/grub' }}"
+  register: pve_host_cmdline_file
+
+- name: Work out the new kernel arguments
+  vars:
+    content: "{{ pve_host_cmdline_file.content | b64decode }}"
+    current: >-
+      {{ content.strip() if pve_host_boot_tool
+         else content | regex_search('(?m)^GRUB_CMDLINE_LINUX_DEFAULT="([^"]*)"', '\1') | first | default('') }}
+    managed: "{{ pve_host_kernel_args | map('regex_replace', '=.*$', '') | list }}"
+    kept: "{{ current.split() | reject('regex', '^(' ~ managed | join('|') ~ ')(=|$)') | list }}"
+  ansible.builtin.set_fact:
+    pve_host_cmdline: "{{ (kept + pve_host_kernel_args) | join(' ') }}"
+
+- name: Write the kernel arguments (proxmox-boot-tool)
+  ansible.builtin.copy:
+    dest: /etc/kernel/cmdline
+    content: "{{ pve_host_cmdline }}\n"
+    mode: "0644"
+  when: pve_host_boot_tool
+  notify: Refresh the boot loader
+
+- name: Write the kernel arguments (GRUB)
+  ansible.builtin.lineinfile:
+    path: /etc/default/grub
+    regexp: '^GRUB_CMDLINE_LINUX_DEFAULT='
+    line: 'GRUB_CMDLINE_LINUX_DEFAULT="{{ pve_host_cmdline }}"'
+  when: not pve_host_boot_tool
+  notify: Refresh the boot loader
